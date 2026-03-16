@@ -1,0 +1,29 @@
+{
+  "name": "netab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference implementation of steng, cord, netab, and POS helpers from context.md.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "find src tests -name '*.test.ts' -print0 | xargs -0 node --import tsx --test",
+    "playground": "tsx playground/demo.ts",
+    "steng:playground:basic": "tsx src/steng/playground/basic.ts --backend memory",
+    "steng:playground:sqlite": "tsx src/steng/playground/basic.ts --backend sqlite",
+    "steng:playground:postgres": "tsx src/steng/playground/basic.ts --backend postgres",
+    "steng:playground:subscriptions": "tsx src/steng/playground/subscriptions.ts",
+    "steng:playground:retention": "tsx src/steng/playground/retention.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.6.0",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "pg": "^8.20.0",
+    "pg-mem": "^3.0.14"
+  }
+}
