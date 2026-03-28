@@ -5,8 +5,37 @@ import { SqliteDb, type SqliteDbOptions } from "../sqldb/sqlite_db.js";
 import { ChangeBus } from "./change_bus.js";
 import { assertFilterSupported, indexValuesForField, matchesFilter } from "./filtering.js";
 import { defaultIdPrefix, deriveClusterShort, generateDistributedId } from "./id_generation.js";
+import {
+  exportSnapshotBundle,
+  importSnapshotBundle,
+  type ResolvedSnapshotImportOptions,
+  type SnapshotExportTableData,
+  type SnapshotImportTableData,
+  type SnapshotImportTableResult,
+} from "./snapshot_bundle.js";
 import type { StengApi } from "../steng.js";
-import type { BlobRecord, ChangeEvent, Filter, FilterClause, GetResult, IndexType, ObjRow, Op, StengIdentityOptions, TableConfig, TableInfo, TableType, Watermark } from "../types.js";
+import type {
+  BlobRecord,
+  ChangeEvent,
+  ExportSnapshotOptions,
+  Filter,
+  FilterClause,
+  GetResult,
+  ImportSnapshotOptions,
+  IndexInfo,
+  IndexType,
+  ObjRow,
+  Op,
+  SnapshotDocRecord,
+  SnapshotImportResult,
+  SnapshotManifest,
+  SnapshotTableSelection,
+  StengIdentityOptions,
+  TableConfig,
+  TableInfo,
+  TableType,
+  Watermark,
+} from "../types.js";
 
 type SqlDialect = {
   name: "sqlite" | "postgres";
@@ -87,6 +116,7 @@ function parseTableConfig(value: string | null | undefined): TableConfig {
     indexes: parsed.indexes ?? {},
     timeField: parsed.timeField,
     retentionHours: parsed.retentionHours,
+    idPrefix: parsed.idPrefix,
   };
 }
 
@@ -286,6 +316,18 @@ export class SqlStengEngine implements StengApi {
       },
     };
     await this.persistTableConfigAndRebuild(tableId, nextConfig);
+  }
+
+  async list_indexes(tableId: number): Promise<IndexInfo[]> {
+    await this.ready();
+    const info = await this.requireTableInfo(tableId);
+    return Object.entries(info.config.indexes)
+      .map(([field, config]) => ({
+        field,
+        type: config.type,
+        multi: Boolean(config.multi),
+      }))
+      .sort((left, right) => left.field.localeCompare(right.field));
   }
 
   async set_table_config(tableId: number, patch: Partial<TableConfig>): Promise<void> {
@@ -598,6 +640,28 @@ export class SqlStengEngine implements StengApi {
     });
   }
 
+  async export_snapshot(options: ExportSnapshotOptions): Promise<SnapshotManifest> {
+    await this.ready();
+    return exportSnapshotBundle(
+      {
+        backendName: this.dialect.name,
+        listTables: async () => this.list_tables(),
+        exportTable: async (table, selection) => this.exportTableSnapshot(table, selection),
+      },
+      options,
+    );
+  }
+
+  async import_snapshot(options: ImportSnapshotOptions): Promise<SnapshotImportResult> {
+    await this.ready();
+    return importSnapshotBundle(
+      {
+        importTable: async (table, resolvedOptions) => this.importTableSnapshot(table, resolvedOptions),
+      },
+      options,
+    );
+  }
+
   private async init(): Promise<void> {
     if (this.dialect.name === "postgres") {
       const schema = this.extractSchemaName();
@@ -698,6 +762,122 @@ export class SqlStengEngine implements StengApi {
     await this.readyPromise;
   }
 
+  private async exportTableSnapshot(table: TableInfo, selection: SnapshotTableSelection): Promise<SnapshotExportTableData> {
+    const info = await this.requireTableInfo(table.tableId);
+    let docs: SnapshotDocRecord[] = [];
+
+    if (selection.filter) {
+      assertFilterSupported(info, selection.filter);
+      const ids = await this.queryFilteredIds(info, selection.filter);
+      const rows = await this.fetchDocsByIds(info.tableId, ids);
+      docs = ids
+        .map((id) => rows.get(id))
+        .filter((row): row is DocRow => Boolean(row))
+        .map((row) => this.docRowToSnapshot(row));
+    } else {
+      const rows = await this.db.query<DocRow>(
+        `SELECT id, json_text, updated_at_ms, deleted, etag
+         FROM ${this.dialect.docsTable}
+         WHERE table_id = ?
+         ${selection.includeTombstones ? "" : "AND deleted = 0"}
+         ORDER BY id ASC`,
+        [info.tableId],
+      );
+      docs = rows.map((row) => this.docRowToSnapshot(row));
+    }
+
+    let blobs: BlobRecord[] = [];
+    if (selection.includeBlobs) {
+      const rows = await this.db.query<BlobRow>(
+        `SELECT id, content_type, sha256, size, bytes
+         FROM ${this.dialect.blobsTable}
+         WHERE table_id = ?
+         ORDER BY id ASC`,
+        [info.tableId],
+      );
+      blobs = rows.map((row) => ({
+        id: row.id,
+        bytes: new Uint8Array(row.bytes),
+        contentType: row.content_type,
+        sha256: row.sha256,
+        size: toNumber(row.size),
+      }));
+    }
+
+    return {
+      table: info,
+      selection: deepClone(selection),
+      watermark: await this.get_watermark(info.tableId),
+      docs,
+      blobs,
+    };
+  }
+
+  private async importTableSnapshot(table: SnapshotImportTableData, options: ResolvedSnapshotImportOptions): Promise<SnapshotImportTableResult> {
+    const existing = await this.get_table_info(table.schema.app, table.schema.db, table.schema.tableName);
+    if (existing && existing.type !== table.schema.type) {
+      throw new Error(
+        `Cannot import ${table.schema.app}/${table.schema.db}/${table.schema.tableName}: local table type ${existing.type} does not match snapshot type ${table.schema.type}`,
+      );
+    }
+
+    const info = await this.ensure_table(table.schema.app, table.schema.db, table.schema.tableName, table.schema.type);
+
+    let docsImported = 0;
+    let tombstonesImported = 0;
+    let blobsImported = 0;
+    let docsSkipped = 0;
+    let blobsSkipped = 0;
+
+    await this.db.tx(async (tx) => {
+      if (options.mode === "replace") {
+        await this.resetTableDataTx(tx, info.tableId);
+      }
+
+      await this.setTableConfigTx(tx, info, table.schema.config, options.mode !== "replace");
+
+      for (const row of table.docs) {
+        const outcome = await this.importSnapshotDocTx(tx, info, row, options);
+        if (outcome === "skipped") {
+          docsSkipped += 1;
+        } else if (row.meta.deleted) {
+          tombstonesImported += 1;
+        } else {
+          docsImported += 1;
+        }
+      }
+
+      for (const blob of table.blobs) {
+        const outcome = await this.importSnapshotBlobTx(tx, info.tableId, blob, table.bundleCreatedAtMs, options);
+        if (outcome === "skipped") {
+          blobsSkipped += 1;
+        } else {
+          blobsImported += 1;
+        }
+      }
+
+      if (options.mode === "replace") {
+        if (table.schema.watermark) {
+          await this.setWatermarkTx(tx, info.tableId, table.schema.watermark);
+        }
+      } else {
+        const merged = this.mergeWatermark(await this.getWatermarkTx(tx, info.tableId), table.schema.watermark);
+        if (merged) {
+          await this.setWatermarkTx(tx, info.tableId, merged);
+        }
+      }
+    });
+
+    return {
+      createdTable: !existing,
+      docsImported,
+      tombstonesImported,
+      blobsImported,
+      docsSkipped,
+      blobsSkipped,
+    };
+  }
+
   private async getTableInfoByName(db: SqlDb, app: string, dbName: string, tableName: string): Promise<TableInfo | null> {
     const row = await db.queryOne<CatalogRow>(
       `SELECT table_id, app, db_name, table_name, type, config_json
@@ -733,26 +913,22 @@ export class SqlStengEngine implements StengApi {
     }
   }
 
+  private docRowToSnapshot(row: DocRow): SnapshotDocRecord {
+    return {
+      id: row.id,
+      value: deepClone(parseDocValue(row)),
+      meta: {
+        updatedAtMs: toNumber(row.updated_at_ms),
+        etag: row.etag,
+        deleted: rowDeleted(row),
+      },
+    };
+  }
+
   private async persistTableConfigAndRebuild(tableId: number, config: TableConfig): Promise<void> {
     const info = await this.requireTableInfo(tableId);
     await this.db.tx(async (tx) => {
-      await tx.exec(
-        `UPDATE ${this.dialect.catalogTable}
-         SET config_json = ?
-         WHERE table_id = ?`,
-        [serializeJson(config), tableId],
-      );
-
-      await tx.exec(`DELETE FROM ${this.dialect.indexTable} WHERE table_id = ?`, [tableId]);
-      const docs = await tx.query<DocRow>(
-        `SELECT id, json_text, updated_at_ms, deleted, etag
-         FROM ${this.dialect.docsTable}
-         WHERE table_id = ? AND deleted = 0`,
-        [tableId],
-      );
-      for (const doc of docs) {
-        await this.insertIndexRowsTx(tx, { ...info, config }, doc.id, parseDocValue(doc));
-      }
+      await this.setTableConfigTx(tx, info, config, true);
     });
   }
 
@@ -775,7 +951,16 @@ export class SqlStengEngine implements StengApi {
   private async getDocRow(db: SqlDb, tableId: number, id: string): Promise<DocRow | null> {
     return db.queryOne<DocRow>(
       `SELECT id, json_text, updated_at_ms, deleted, etag
-       FROM ${this.dialect.docsTable}
+      FROM ${this.dialect.docsTable}
+      WHERE table_id = ? AND id = ?`,
+      [tableId, id],
+    );
+  }
+
+  private async getBlobRow(db: SqlDb, tableId: number, id: string): Promise<BlobRow | null> {
+    return db.queryOne<BlobRow>(
+      `SELECT id, content_type, sha256, size, bytes
+       FROM ${this.dialect.blobsTable}
        WHERE table_id = ? AND id = ?`,
       [tableId, id],
     );
@@ -811,6 +996,23 @@ export class SqlStengEngine implements StengApi {
       [info.tableId, id, serializeJson(currentValue), updatedAtMs, etag],
     );
     await db.exec(`DELETE FROM ${this.dialect.indexTable} WHERE table_id = ? AND id = ?`, [info.tableId, id]);
+  }
+
+  private async writeImportedDocTx(db: SqlDb, info: TableInfo, row: SnapshotDocRecord): Promise<void> {
+    await db.exec(
+      `INSERT INTO ${this.dialect.docsTable} (table_id, id, json_text, deleted, updated_at_ms, etag)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (table_id, id) DO UPDATE SET
+         json_text = excluded.json_text,
+         deleted = excluded.deleted,
+         updated_at_ms = excluded.updated_at_ms,
+         etag = excluded.etag`,
+      [info.tableId, row.id, serializeJson(row.value), row.meta.deleted ? 1 : 0, row.meta.updatedAtMs, row.meta.etag],
+    );
+    await db.exec(`DELETE FROM ${this.dialect.indexTable} WHERE table_id = ? AND id = ?`, [info.tableId, row.id]);
+    if (!row.meta.deleted) {
+      await this.insertIndexRowsTx(db, info, row.id, row.value);
+    }
   }
 
   private async insertIndexRowsTx(db: SqlDb, info: TableInfo, id: string, value: unknown): Promise<void> {
@@ -882,6 +1084,38 @@ export class SqlStengEngine implements StengApi {
     );
   }
 
+  private async resetTableDataTx(db: SqlDb, tableId: number): Promise<void> {
+    await db.exec(`DELETE FROM ${this.dialect.indexTable} WHERE table_id = ?`, [tableId]);
+    await db.exec(`DELETE FROM ${this.dialect.docsTable} WHERE table_id = ?`, [tableId]);
+    await db.exec(`DELETE FROM ${this.dialect.oplogTable} WHERE table_id = ?`, [tableId]);
+    await db.exec(`DELETE FROM ${this.dialect.watermarkTable} WHERE table_id = ?`, [tableId]);
+    await db.exec(`DELETE FROM ${this.dialect.blobsTable} WHERE table_id = ?`, [tableId]);
+  }
+
+  private async setTableConfigTx(db: SqlDb, info: TableInfo, config: TableConfig, rebuildIndexes: boolean): Promise<void> {
+    await db.exec(
+      `UPDATE ${this.dialect.catalogTable}
+       SET config_json = ?
+       WHERE table_id = ?`,
+      [serializeJson(config), info.tableId],
+    );
+
+    await db.exec(`DELETE FROM ${this.dialect.indexTable} WHERE table_id = ?`, [info.tableId]);
+    if (!rebuildIndexes) {
+      return;
+    }
+
+    const docs = await db.query<DocRow>(
+      `SELECT id, json_text, updated_at_ms, deleted, etag
+       FROM ${this.dialect.docsTable}
+       WHERE table_id = ? AND deleted = 0`,
+      [info.tableId],
+    );
+    for (const doc of docs) {
+      await this.insertIndexRowsTx(db, { ...info, config }, doc.id, parseDocValue(doc));
+    }
+  }
+
   private async commitDocOpTx(
     db: SqlDb,
     info: TableInfo,
@@ -925,6 +1159,80 @@ export class SqlStengEngine implements StengApi {
 
   private publishChange(tableId: number, evt: ChangeEvent): void {
     this.changeBus.publish(tableId, evt);
+  }
+
+  private mergeWatermark(current: Watermark | null, incoming: Watermark | null): Watermark | null {
+    if (!current) {
+      return deepClone(incoming);
+    }
+    if (!incoming) {
+      return deepClone(current);
+    }
+    const currentValue = current.localMinTimeMs;
+    const incomingValue = incoming.localMinTimeMs;
+    if (currentValue === undefined) {
+      return deepClone(incoming);
+    }
+    if (incomingValue === undefined) {
+      return deepClone(current);
+    }
+    return { localMinTimeMs: Math.max(currentValue, incomingValue) };
+  }
+
+  private async importSnapshotDocTx(
+    db: SqlDb,
+    info: TableInfo,
+    row: SnapshotDocRecord,
+    options: ResolvedSnapshotImportOptions,
+  ): Promise<"imported" | "skipped"> {
+    const current = await this.getDocRow(db, info.tableId, row.id);
+    if (current) {
+      if (options.conflictMode === "error") {
+        throw new Error(`Snapshot import conflict on document ${row.id}`);
+      }
+      if (options.conflictMode === "skip") {
+        return "skipped";
+      }
+    }
+
+    await this.writeImportedDocTx(db, info, row);
+    await this.appendOpTx(db, info.tableId, {
+      op_type: row.meta.deleted ? "DELETE" : !current || rowDeleted(current) ? "ADD" : "REPLACE",
+      id: row.id,
+      payload: row.meta.deleted ? null : row.value,
+      ts_ms: row.meta.updatedAtMs,
+    });
+    return "imported";
+  }
+
+  private async importSnapshotBlobTx(
+    db: SqlDb,
+    tableId: number,
+    blob: BlobRecord,
+    tsMs: number,
+    options: ResolvedSnapshotImportOptions,
+  ): Promise<"imported" | "skipped"> {
+    const current = await this.getBlobRow(db, tableId, blob.id);
+    if (current) {
+      if (options.conflictMode === "error") {
+        throw new Error(`Snapshot import conflict on blob ${blob.id}`);
+      }
+      if (options.conflictMode === "skip") {
+        return "skipped";
+      }
+    }
+
+    await this.upsertBlobTx(db, tableId, blob, tsMs);
+    await this.appendOpTx(db, tableId, {
+      op_type: "BLOB_ADD",
+      id: blob.id,
+      payload: {
+        bytes: bytesToBase64(blob.bytes),
+        contentType: blob.contentType,
+      },
+      ts_ms: tsMs,
+    });
+    return "imported";
   }
 
   private oplogRowToOp(row: OplogRow): Op {

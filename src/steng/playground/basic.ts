@@ -131,6 +131,7 @@ export async function runBasicCrudPlayground(backend: StengBackend = "memory"): 
     ]);
 
     const updatedRow = await steng.get_objs(table.tableId, [inserted.ids[0]], null, 0, 1);
+    const indexes = await steng.list_indexes(table.tableId);
     const cookingOnEq1 = await steng.get_objs(
       table.tableId,
       null,
@@ -164,6 +165,7 @@ export async function runBasicCrudPlayground(backend: StengBackend = "memory"): 
           backend,
           clusterShort,
           tableInfo: await steng.get_table_info_by_id(table.tableId),
+          indexes,
           listedTables,
           inserted: {
             ids: inserted.ids,

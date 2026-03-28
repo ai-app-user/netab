@@ -8,6 +8,10 @@ test("steng supports indexed CRUD, subscriptions, and retention", async () => {
     const table = await steng.ensure_table("pos", "miami1", "orders", "json");
     await steng.add_index(table.tableId, "createdAt", "time");
     await steng.add_index(table.tableId, "equipmentId", "str");
+    assert.deepEqual(await steng.list_indexes(table.tableId), [
+      { field: "createdAt", type: "time", multi: false },
+      { field: "equipmentId", type: "str", multi: false },
+    ]);
     await steng.set_table_config(table.tableId, {
       timeField: "createdAt",
       retentionHours: 1,

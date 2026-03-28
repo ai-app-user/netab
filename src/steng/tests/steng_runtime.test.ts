@@ -14,6 +14,9 @@ for (const backend of ["memory", "sqlite", "postgres"] as const satisfies readon
 
       const table = await steng.ensure_table("pos", "miami1", "orders", "json");
       await steng.add_index(table.tableId, "status", "str");
+      assert.deepEqual(await steng.list_indexes(table.tableId), [
+        { field: "status", type: "str", multi: false },
+      ]);
       const inserted = await steng.add_objs(table.tableId, [{ value: { status: "PENDING", totalCents: 1200 } }]);
 
       assert.equal(inserted.ids.length, 1);

@@ -26,6 +26,7 @@ What it shows:
 - instantiate one high-level `Steng` class instead of engine-specific classes
 - create a table
 - add indexes
+- list indexes
 - configure `timeField` and `idPrefix`
 - insert with engine-generated ids
 - store app-level keys inside the JSON payload when needed
@@ -60,7 +61,37 @@ const steng = new Steng({ backend: "sqlite", clusterShort: "mi1a" });
 
 The backend-specific initialization is handled inside `src/steng/steng.ts`.
 
-### 2. Subscriptions
+### 2. Snapshot Export/Import
+
+```bash
+npm run steng:playground:snapshot
+```
+
+Backed by: `src/steng/playground/snapshot.ts`
+
+What it shows:
+
+- create a source dataset
+- export a backend-independent snapshot bundle
+- restore the same snapshot into another backend
+- preserve internal ids, tombstones, blobs, and watermarks
+- print the manifest plus the restored rows
+
+Useful direct forms:
+
+```bash
+tsx src/steng/playground/snapshot.ts --backend memory --restore-backend sqlite
+tsx src/steng/playground/snapshot.ts --backend sqlite --restore-backend postgres --out ./tmp/orders.tar.gz
+```
+
+Or with environment variables:
+
+```bash
+STENG_BACKEND=postgres STENG_RESTORE_BACKEND=memory tsx src/steng/playground/snapshot.ts
+STENG_SNAPSHOT_OUT=./tmp/orders.tar.gz tsx src/steng/playground/snapshot.ts --backend sqlite
+```
+
+### 3. Subscriptions
 
 ```bash
 npm run steng:playground:subscriptions
@@ -74,7 +105,7 @@ What it shows:
 - add/update/delete events
 - unsubscribe flow
 
-### 3. Retention
+### 4. Retention
 
 ```bash
 npm run steng:playground:retention
@@ -88,7 +119,7 @@ What it shows:
 - watermark advancement
 - old rows being tombstoned
 
-### 4. SQLite backend
+### 5. SQLite backend
 
 ```bash
 npm run steng:playground:sqlite
@@ -102,7 +133,7 @@ What it shows:
 - backend set to SQLite
 - kept as a small compatibility entrypoint if you want a dedicated file name
 
-### 5. Postgres backend
+### 6. Postgres backend
 
 ```bash
 npm run steng:playground:postgres

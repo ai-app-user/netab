@@ -6,10 +6,15 @@ import type { PostgresDbOptions } from "./sqldb/postgres_db.js";
 import type { SqliteDbOptions } from "./sqldb/sqlite_db.js";
 import type {
   ChangeEvent,
+  ExportSnapshotOptions,
   Filter,
   GetResult,
+  ImportSnapshotOptions,
+  IndexInfo,
   IndexType,
   Op,
+  SnapshotImportResult,
+  SnapshotManifest,
   StengIdentityOptions,
   TableConfig,
   TableInfo,
@@ -45,6 +50,9 @@ export interface StengApi {
 
   /** Add an index so a field can be used in filters. */
   add_index(tableId: number, field: string, idx_type: IndexType, multi?: boolean): Promise<void>;
+
+  /** List all indexes currently configured for the table. */
+  list_indexes(tableId: number): Promise<IndexInfo[]>;
 
   /** Patch table configuration such as `timeField`, `retentionHours`, or `idPrefix`. */
   set_table_config(tableId: number, patch: Partial<TableConfig>): Promise<void>;
@@ -106,6 +114,24 @@ export interface StengApi {
 
   /** Set the table watermark. */
   set_watermark(tableId: number, wm: Watermark): Promise<void>;
+
+  /**
+   * Export a logical `steng` snapshot as either a directory bundle or an archive.
+   *
+   * The bundle preserves table schema, internal document ids, tombstones, blobs,
+   * and watermarks in a backend-independent format. Numeric `tableId` values are
+   * recorded for reference but are not portable across imports.
+   */
+  export_snapshot(options: ExportSnapshotOptions): Promise<SnapshotManifest>;
+
+  /**
+   * Import a logical `steng` snapshot bundle.
+   *
+   * Import preserves internal document ids, recreates local oplog entries with
+   * synthetic restore operations, and remaps numeric table ids to the local
+   * backend. `replace` mode clears each included table before restore.
+   */
+  import_snapshot(options: ImportSnapshotOptions): Promise<SnapshotImportResult>;
 }
 
 /** Backends supported by the high-level `Steng` wrapper. */
@@ -286,6 +312,11 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
+  list_indexes(tableId: number): Promise<IndexInfo[]> {
+    return this.api.list_indexes(tableId);
+  }
+
+  /** @inheritdoc */
   set_table_config(tableId: number, patch: Partial<TableConfig>): Promise<void> {
     return this.api.set_table_config(tableId, patch);
   }
@@ -368,5 +399,15 @@ export class Steng implements StengApi {
   /** @inheritdoc */
   set_watermark(tableId: number, wm: Watermark): Promise<void> {
     return this.api.set_watermark(tableId, wm);
+  }
+
+  /** @inheritdoc */
+  export_snapshot(options: ExportSnapshotOptions): Promise<SnapshotManifest> {
+    return this.api.export_snapshot(options);
+  }
+
+  /** @inheritdoc */
+  import_snapshot(options: ImportSnapshotOptions): Promise<SnapshotImportResult> {
+    return this.api.import_snapshot(options);
   }
 }
