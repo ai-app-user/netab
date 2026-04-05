@@ -1,0 +1,3 @@
+cord playground sample payload
+line 2: exercise @file and @-
+line 3: verify preview and sha256 output

@@ -82,7 +82,7 @@ export class NetabDirectory {
     }
   }
 
-  getLeader(clusterId: string): NetabService | null {
+  async getLeader(clusterId: string): Promise<NetabService | null> {
     const cluster = this.services.get(clusterId);
     if (!cluster || cluster.size === 0) {
       return null;
@@ -92,7 +92,7 @@ export class NetabDirectory {
     if (!sample) {
       return null;
     }
-    const leaderId = sample.cord.get_leader();
+    const leaderId = await sample.cord.get_leader();
     return leaderId ? cluster.get(leaderId) ?? null : null;
   }
 }
@@ -450,7 +450,7 @@ export class NetabService implements NetabServiceLike {
 
   private async routeWrite<T>(tableName: string, fn: (leader: NetabService) => Promise<T>): Promise<T> {
     const targetClusterId = this.policyFor(tableName).writePrimaryClusterId;
-    const leader = this.options.directory.getLeader(targetClusterId);
+    const leader = await this.options.directory.getLeader(targetClusterId);
     if (!leader) {
       throw new Error(`No leader available for cluster ${targetClusterId}`);
     }
@@ -510,7 +510,7 @@ export class NetabService implements NetabServiceLike {
     max_count: number,
   ): Promise<NetabGetResult | null> {
     for (const clusterId of this.policyFor(tableName).readFallbackClusters ?? []) {
-      const leader = this.options.directory.getLeader(clusterId);
+      const leader = await this.options.directory.getLeader(clusterId);
       if (!leader || leader === this) {
         continue;
       }

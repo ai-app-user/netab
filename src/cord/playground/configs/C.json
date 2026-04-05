@@ -1,0 +1,10 @@
+{
+  "addr": "127.0.0.1:4103",
+  "props": {
+    "type": "dev",
+    "site": "gamma"
+  },
+  "clusterId": "offline",
+  "eligible": false,
+  "priority": 1
+}

@@ -1,0 +1,10 @@
+{
+  "addr": "127.0.0.1:4102",
+  "props": {
+    "type": "dev",
+    "site": "beta"
+  },
+  "clusterId": "offline",
+  "eligible": true,
+  "priority": 5
+}
