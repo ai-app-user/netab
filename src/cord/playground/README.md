@@ -1,5 +1,281 @@
 # cord Playground
 
+## Current CLI UX
+
+The current recommended CLI shape is:
+
+```bash
+coord [@sender] -command [@target|%cluster] [args...] [--options...]
+```
+
+Meaning:
+
+- `@sender`: optional local node selector when more than one local daemon exists
+- `-command`: every command starts with one leading `-`
+- `@target`: node name or `host:port`
+- `%cluster`: cluster selector
+- `@./file.txt` or `f:./file.txt`: file payloads for commands like `-echo`
+
+Short examples:
+
+```bash
+./scripts/coord -status
+./scripts/coord -start:4102 A
+./scripts/coord -whoami
+./scripts/coord -connect @127.0.0.1:4104 --ttl=0
+./scripts/coord -peers
+./scripts/coord @D -echo @A "hello from D"
+./scripts/coord -cluster:nodes %offline
+```
+
+Important behavior:
+
+- If exactly one local daemon exists in the current `COORD_PLAYGROUND_ROOT`, sender selection is implicit.
+- If multiple local daemons exist, you must choose the local sender explicitly, for example `coord @A -peers`.
+- Any successful RPC learns peer identity automatically.
+- `-connect` upgrades one-way reachability into a durable reverse path.
+- `-learn` imports remote peer names as suggestions.
+- `-route:add` is still available when you want explicit proxy policy.
+
+## Current Commands
+
+Local/system commands:
+
+- `-start[:port] [node_name] [config.json|config.js]`
+- `-stop [node_name|all]`
+- `-status`
+- `-cleanup [local|global]`
+- `-discover [port1[,port2...]] [ttl_in_secs]`
+- `-save [path.json]`
+- `-load [path.json]`
+- `-help [group|group:cmd]`
+
+Foundation commands:
+
+- `-whoami [@target]`
+- `-ping @target`
+- `-echo [@target] [args...] [@./file|f:./file|@-]`
+- `-sleep [@target] 200`
+- `-peers [@target]`
+- `-routes [@target]`
+- `-connect @target --ttl=0`
+- `-disconnect @target`
+- `-learn @target`
+- `-route:add @dst [@proxy]`
+- `-route:del @dst`
+- `-route:deny @dst [in|out|both]`
+- `-proxy:on [@dst]`
+- `-proxy:off`
+
+Cluster / IAM / election commands:
+
+- `-cluster:create %cluster`
+- `-cluster:join %cluster`
+- `-cluster:leave %cluster`
+- `-cluster:nodes %cluster`
+- `-cluster:exec %cluster method=cord.foundation.whoami`
+- `-iam:defineCommand ...`
+- `-iam:grant ...`
+- `-iam:canInvoke ...`
+- `-users:ensureGuest`
+- `-bootstrap:register_unallocated`
+- `-bootstrap:list_unallocated`
+- `-election:addShard %cluster ...`
+- `-election:getLeader %cluster ...`
+
+## Verified Examples
+
+### 1. Single Local Node
+
+Start one node and use implicit sender selection:
+
+```bash
+./scripts/coord -start:4102 A
+./scripts/coord -status
+./scripts/coord -whoami
+./scripts/coord -peers
+```
+
+Expected:
+
+- `-whoami` runs on `A`
+- `-peers` is empty until `A` talks to another node
+
+### 2. Direct Learning By IP
+
+This is the simplest way to learn a remote peer name from an address.
+
+```bash
+./scripts/coord -start:4101 A
+./scripts/coord -start:4104 P
+
+./scripts/coord @A -whoami @127.0.0.1:4104
+./scripts/coord @A -peers
+./scripts/coord @P -peers
+```
+
+Typical result:
+
+```text
+coord peers on A
+
+NAME      VIA               WAYS   TTL      STATE
+P         127.0.0.1:4104    out    298s     learned
+```
+
+```text
+coord peers on P
+
+NAME      VIA               WAYS   TTL      STATE
+A         127.0.0.1:4101    in     298s     learned
+```
+
+This is the one-way case:
+
+- `A` learned that it can send to `P`
+- `P` learned that `A` reached it
+- there is no reverse path yet
+
+### 3. Reverse Connect
+
+Now upgrade that one-way direct reachability into a durable reverse path.
+
+```bash
+./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0
+./scripts/coord @A -peers
+./scripts/coord @P -peers
+./scripts/coord @P -whoami @A
+```
+
+Typical result:
+
+```text
+coord peers on A
+
+NAME      VIA               WAYS   TTL      STATE
+P         127.0.0.1:4104    both   -        connected
+```
+
+```text
+coord peers on P
+
+NAME      VIA               WAYS   TTL      STATE
+A         reverse           both   -        connected
+```
+
+`reverse` means:
+
+- `A` initiated the long-lived connection into `P`
+- `P` can now reach `A` over that reverse path
+- path rendering uses `-<` for that last hop
+
+### 4. Learn Peers From A Proxy
+
+With one more node `D` on the same side as `P`, import `A` as a suggested peer:
+
+```bash
+./scripts/coord -start:4105 D
+./scripts/coord @D -learn @P
+./scripts/coord @D -peers
+```
+
+Typical result:
+
+```text
+coord peers on D
+
+NAME      VIA               WAYS   TTL      STATE
+A         via P             -      298s     suggested
+P         127.0.0.1:4104    out    298s     learned
+```
+
+This means:
+
+- `D` knows `A` exists
+- `P` claims it can reach `A`
+- `D` has not verified that path yet
+
+### 5. Proxy To Reverse Hop: `D -> P -< A`
+
+Add explicit policy on `D`, then execute through `P`.
+
+```bash
+./scripts/coord @D -route:add @A @P
+./scripts/coord @D -echo @A "hello from D" --verbose
+```
+
+Expected route shape:
+
+```text
+D -> P -< A
+```
+
+That means:
+
+- `D -> P`: normal direct hop
+- `P -< A`: reverse hop that uses the connection `A` opened into `P`
+
+### 6. Reply Path Learned On `A`
+
+After `D` reaches `A` through `P`, `A` learns that `D` exists via `P`:
+
+```bash
+./scripts/coord @A -peers
+./scripts/coord @A -routes
+```
+
+Typical result:
+
+```text
+coord peers on A
+
+NAME      VIA               WAYS   TTL      STATE
+D         via P             in     298s     learned
+P         127.0.0.1:4104    both   -        connected
+```
+
+If you want to force the reply to use the learned proxy path instead of any direct local shortcut, deny direct outbound first:
+
+```bash
+./scripts/coord @A -route:deny @D out
+./scripts/coord @A -whoami @D --verbose
+```
+
+Expected path:
+
+```text
+A -> P -> D
+```
+
+### 7. Proxy Mode Default Destination
+
+You can make one node behave like a shell pointed at another destination:
+
+```bash
+./scripts/coord @A -proxy:on @D
+./scripts/coord @A -whoami
+./scripts/coord @A -proxy:off
+```
+
+While proxy mode is on:
+
+- commands without `@target` default to `D`
+- explicit `@target` still overrides it
+
+### 8. File Payloads
+
+Both forms are supported:
+
+```bash
+./scripts/coord @A -echo @P @./src/cord/playground/samples/bigfile.txt
+./scripts/coord @A -echo @P f:./src/cord/playground/samples/bigfile.txt
+cat ./src/cord/playground/samples/bigfile.txt | ./scripts/coord @A -echo @P @-
+```
+
+## Legacy Notes
+
+Older target-first examples remain below for historical context, but the recommended syntax is now the `[@sender] -command [@target|%cluster]` form documented above.
+
 This folder now exposes the design-doc CLI directly through [`scripts/coord`](/home/user/src/netab/scripts/coord).
 
 If you want the exact command shape from the `coord_cli` chapter, use:

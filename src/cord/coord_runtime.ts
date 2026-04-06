@@ -420,7 +420,7 @@ function formatBaseHelp(registry: CoordCommandRegistry): string {
 function formatGroupHelp(group: string, registry: CoordCommandRegistry): string {
   const lines = [`${group} commands`, ""];
   if (group === "foundation") {
-    lines.push("If the group is omitted, `foundation` is the default.", "");
+    lines.push("Foundation commands are the default when you use a bare command such as `-whoami` or `-peers`.", "");
   }
   for (const command of registry.listGroupCommands(group)) {
     const help = registry.helpFor(command);
@@ -437,22 +437,23 @@ function formatOverview(registry: CoordCommandRegistry): string {
     "Run `./scripts/coord` with no arguments to show this overview again.",
     "",
     "First-time quick start:",
-    "  ./scripts/coord -start:4101 A ./src/cord/playground/configs/A.json",
-    "  ./scripts/coord -start:4102 B ./src/cord/playground/configs/B.json",
+    "  ./scripts/coord -start:4101 A",
+    "  ./scripts/coord -start:4104 P",
     "  ./scripts/coord -status",
-    "  ./scripts/coord -discover 4101,4102 600",
-    "  ./scripts/coord A whoami",
-    "  ./scripts/coord B echo test works",
+    "  ./scripts/coord -whoami",
+    "  ./scripts/coord -connect @127.0.0.1:4104 --ttl=0",
+    "  ./scripts/coord -peers",
     "  ./scripts/coord -stop all",
     "",
     "Syntax:",
-    "  coord -[base_cmd] [...cmd_params...]",
-    "  coord [node_name|node_ip[:port]|#cluster_name] [--options] [group:]cmd [...cmd_params...]",
+    "  coord [@sender] -command [@target|%cluster] [args...] [--options...]",
     "",
-    "Targets:",
-    "  A                  started node name or discovered node",
-    "  127.0.0.1:4102     direct address",
-    "  #offline           cluster target",
+    "Selectors:",
+    "  @A                 node id or learned peer name",
+    "  @127.0.0.1:4101    direct address",
+    "  %offline           cluster name",
+    "  @./file.txt        file payload shortcut",
+    "  f:./file.txt       explicit file payload syntax",
     "",
     "Base commands:",
   ];
@@ -473,7 +474,7 @@ function formatOverview(registry: CoordCommandRegistry): string {
     "More help:",
     "  ./scripts/coord -help base",
     "  ./scripts/coord -help foundation",
-    "  ./scripts/coord -help foundation:echo",
+    "  ./scripts/coord -help foundation:connect",
     "  ./scripts/coord -help cluster",
   );
   return lines.join("\n");
@@ -515,27 +516,57 @@ function registerHelp(registry: CoordCommandRegistry): void {
   );
 }
 
-async function resolveTarget(files: PlaygroundFiles, inv: Invocation): Promise<RpcTarget> {
-  if (inv.target.kind === "addr") {
-    return { addr: inv.target.value };
+async function resolveSender(files: PlaygroundFiles, inv: Invocation): Promise<RpcTarget> {
+  if (inv.sender.kind === "addr") {
+    return { addr: inv.sender.value };
   }
-  if (inv.target.kind === "node") {
-    return { nodeId: inv.target.value };
+  if (inv.sender.kind === "node") {
+    return { nodeId: inv.sender.value };
   }
-  throw new Error(`Target kind ${inv.target.kind} is not supported for this command`);
-}
 
-async function resolveCoordinatorAddrForCluster(files: PlaygroundFiles, clusterId: string): Promise<RpcTarget> {
   const nodes = await loadNodes(files);
-  const selected = nodes.find((node) => node.clusterId === clusterId) ?? nodes[0];
-  if (!selected) {
-    throw new Error(`No nodes configured for cluster ${clusterId}`);
+  if (nodes.length === 0) {
+    throw new Error('No local coord node is available. Start one first with "coord -start:4102 A".');
   }
-  return { nodeId: selected.nodeId };
+  if (nodes.length === 1) {
+    return { nodeId: nodes[0].nodeId };
+  }
+
+  const healthy: PlaygroundNodeRecord[] = [];
+  for (const node of nodes) {
+    if (await waitForHttpNode(node.addr, 250)) {
+      healthy.push(node);
+    }
+  }
+  if (healthy.length === 1) {
+    return { nodeId: healthy[0].nodeId };
+  }
+  throw new Error('Multiple local coord nodes are configured. Specify a sender first, for example "coord @A -peers".');
 }
 
-function normalizeDst(inv: Invocation): string | undefined {
-  return typeof inv.options.dst === "string" && inv.options.dst.length > 0 ? String(inv.options.dst) : undefined;
+function normalizeExecTarget(target: Invocation["target"]): { kind: "node"; value: string } | { kind: "addr"; value: string } | undefined {
+  if (target.kind === "node" || target.kind === "addr") {
+    return { kind: target.kind, value: target.value };
+  }
+  return undefined;
+}
+
+function selectorToRpcTarget(target: Invocation["target"]): RpcTarget {
+  if (target.kind === "addr") {
+    return { addr: target.value };
+  }
+  if (target.kind === "node") {
+    return { nodeId: target.value };
+  }
+  throw new Error(`Target kind ${target.kind} is not supported for this command`);
+}
+
+function normalizeNodeArg(value: unknown): string {
+  const text = String(value ?? "").trim();
+  if (text.startsWith("@")) {
+    return text.slice(1);
+  }
+  return text;
 }
 
 function formatTtl(ms: number | null): string {
@@ -545,49 +576,53 @@ function formatTtl(ms: number | null): string {
   return `${Math.max(0, Math.floor(ms / 1000))}s`;
 }
 
-function formatRouteTable(table: RouteTable, verbose = false): string {
+function formatPeerTable(table: { nodeId: string; entries: Array<{ nodeId: string; via: string; ways: string; ttlRemainingMs: number | null; state: string }> }): string {
   const lines = [
-    `coord route table on ${table.nodeId}`,
+    `coord peers on ${table.nodeId}`,
     "",
-    `proxy mode: ${table.proxyMode.enabled ? "on" : "off"}${table.proxyMode.defaultDstNodeId ? ` -> ${table.proxyMode.defaultDstNodeId}` : ""}`,
-    `observation ttl: ${Math.floor(table.observationTtlMs / 1000)}s`,
+    "NAME      VIA               WAYS   TTL      STATE",
   ];
   if (table.entries.length === 0) {
-    lines.push("", "no known peers");
+    lines.push("no known peers");
     return lines.join("\n");
   }
-  if (verbose) {
-    lines.push("", "DEST      VIEW             DENY      OBS       TTL_IN   TTL_OUT");
-    for (const entry of table.entries) {
-      const deny = entry.denyIn && entry.denyOut ? "in,out" : entry.denyIn ? "in" : entry.denyOut ? "out" : "-";
-      const obs = entry.observedIn && entry.observedOut ? "in,out" : entry.observedIn ? "in" : entry.observedOut ? "out" : "-";
-      lines.push(
-        `${entry.nodeId.padEnd(9)} ${entry.summary.padEnd(16)} ${deny.padEnd(9)} ${obs.padEnd(9)} ${formatTtl(entry.ttlRemainingInMs).padEnd(8)} ${formatTtl(entry.ttlRemainingOutMs)}`,
-      );
-    }
-    return lines.join("\n");
-  }
-  lines.push("", "DEST      VIEW             DENY      OBS");
   for (const entry of table.entries) {
-    const deny = entry.denyIn && entry.denyOut ? "in,out" : entry.denyIn ? "in" : entry.denyOut ? "out" : "-";
-    const obs = entry.observedIn && entry.observedOut ? "in,out" : entry.observedIn ? "in" : entry.observedOut ? "out" : "-";
-    lines.push(`${entry.nodeId.padEnd(9)} ${entry.summary.padEnd(16)} ${deny.padEnd(9)} ${obs}`);
+    lines.push(`${entry.nodeId.padEnd(9)} ${entry.via.padEnd(17)} ${entry.ways.padEnd(6)} ${formatTtl(entry.ttlRemainingMs).padEnd(8)} ${entry.state}`);
   }
   return lines.join("\n");
 }
 
-async function callFoundationExec(
+function formatRouteTable(table: RouteTable): string {
+  const lines = [
+    `coord routes on ${table.nodeId}`,
+    "",
+    `proxy mode: ${table.proxyMode.enabled ? "on" : "off"}${table.proxyMode.defaultDstNodeId ? ` -> ${table.proxyMode.defaultDstNodeId}` : ""}`,
+    `learn ttl: ${Math.floor(table.observationTtlMs / 1000)}s`,
+  ];
+  if (table.entries.length === 0) {
+    lines.push("", "no known routes");
+    return lines.join("\n");
+  }
+  lines.push("", "DEST      VIA               WAYS   TTL      STATE       PATH");
+  for (const entry of table.entries) {
+    lines.push(
+      `${entry.nodeId.padEnd(9)} ${entry.via.padEnd(17)} ${entry.ways.padEnd(6)} ${formatTtl(entry.ttlRemainingMs).padEnd(8)} ${entry.state.padEnd(11)} ${entry.path}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+async function callSenderExec(
   files: PlaygroundFiles,
   inv: Invocation,
   remoteMethod: string,
   params: unknown,
-  opts?: { wrapRoute?: boolean; includeRttMs?: boolean },
+  opts?: { wrapRoute?: boolean },
 ): Promise<unknown> {
   const runtime = await buildRuntime(files);
   try {
-    const target =
-      inv.target.kind === "cluster" ? await resolveCoordinatorAddrForCluster(files, inv.target.value) : await resolveTarget(files, inv);
-    const startedMs = Date.now();
+    const sender = await resolveSender(files, inv);
+    const senderNodeId = "nodeId" in sender ? sender.nodeId : undefined;
     const response = await runtime.client.call<{
       result: unknown;
       route: {
@@ -595,38 +630,60 @@ async function callFoundationExec(
         executedNodeId: string;
         mode: "local" | "direct" | "proxy";
         nextHopNodeId: string;
-        proxyNodeId?: string;
         path: string[];
+        hops: Array<{ from: string; to: string; kind: "direct" | "reverse" }>;
       };
-    }>(
-      target,
+    }>( 
+      sender,
       "cord.foundation.exec",
       {
         method: remoteMethod,
         params,
-        dstNodeId: normalizeDst(inv),
+        dst: normalizeExecTarget(inv.target),
         timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
         traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-        verbose: inv.options.verbose === true,
       },
       {
         timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
         traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
         auth: authForCli(runtime.client),
+        originNodeId: senderNodeId,
       },
     );
-    if (opts?.includeRttMs) {
-      return inv.options.verbose === true || inv.options.json === true || opts.wrapRoute
-        ? { ok: true, rttMs: Date.now() - startedMs, route: response.route, result: response.result }
-        : { ok: true, rttMs: Date.now() - startedMs };
-    }
     if (inv.options.verbose === true || opts?.wrapRoute) {
       return {
         route: response.route,
+        path: response.route.hops.length === 0
+          ? response.route.executedNodeId
+          : response.route.hops.reduce(
+              (text, hop, index) => (index === 0 ? hop.from : text) + (hop.kind === "reverse" ? ` -< ${hop.to}` : ` -> ${hop.to}`),
+              "",
+            ),
         result: response.result,
       };
     }
     return response.result;
+  } finally {
+    await stopRuntime(runtime);
+  }
+}
+
+async function callSenderMethod(files: PlaygroundFiles, inv: Invocation, method: string, params: unknown): Promise<unknown> {
+  const runtime = await buildRuntime(files);
+  try {
+    const sender = await resolveSender(files, inv);
+    const senderNodeId = "nodeId" in sender ? sender.nodeId : undefined;
+    return runtime.client.call(
+      sender,
+      method,
+      params,
+      {
+        timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
+        traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
+        auth: authForCli(runtime.client),
+        originNodeId: senderNodeId,
+      },
+    );
   } finally {
     await stopRuntime(runtime);
   }
@@ -914,199 +971,12 @@ function registerBaseCommands(registry: CoordCommandRegistry, files: PlaygroundF
 }
 
 function registerTargetedCommands(registry: CoordCommandRegistry, files: PlaygroundFiles): void {
-  const targetHelp = (summary: string, usage: string | string[], examples: string[], options = RPC_OPTIONS): HelpSpec => ({
+  const commandHelp = (summary: string, usage: string | string[], examples: string[], options = RPC_OPTIONS): HelpSpec => ({
     summary,
     usage,
     examples,
     options,
   });
-
-  registry.registerCmd(
-    "foundation:whoami",
-    async (inv) => callFoundationExec(files, inv, "cord.foundation.whoami", {}),
-    targetHelp("Return node identity", "coord <node|addr> [--timeout=MS] whoami", ["./scripts/coord A whoami", "./scripts/coord 127.0.0.1:4102 whoami"]),
-  );
-
-  registry.registerCmd(
-    "foundation:ping",
-    async (inv) => callFoundationExec(files, inv, "cord.foundation.ping", {}, { includeRttMs: true }),
-    targetHelp("Measure ping RTT", "coord <node|addr> [--dst=NODE] ping", ["./scripts/coord B ping", "./scripts/coord A --dst=D ping"], RPC_OPTIONS),
-  );
-
-  registry.registerCmd(
-    "foundation:echo",
-    async (inv) =>
-      callFoundationExec(files, inv, "cord.foundation.echo", {
-        args: inv.args,
-        named: inv.params,
-        payload: normalizePayload(inv),
-      }),
-    targetHelp(
-      "Echo args or payload",
-      "coord <node|addr> [--dst=NODE] echo [args...] [@file|@-]",
-      ["./scripts/coord B echo test works", "./scripts/coord A --dst=D echo hello", "./scripts/coord B echo @./src/cord/playground/samples/bigfile.txt"],
-    ),
-  );
-
-  registry.registerCmd(
-    "foundation:sleep",
-    async (inv) =>
-      callFoundationExec(files, inv, "cord.foundation.sleep", {
-        ms: Number(inv.params.ms ?? inv.args[0] ?? 0),
-      }),
-    targetHelp("Sleep for N ms", "coord <node|addr> [--timeout=MS] [--dst=NODE] sleep ms=2000", ["./scripts/coord B --timeout=200 sleep ms=2000"]),
-  );
-
-  registry.registerCmd(
-    "foundation:route",
-    async (inv) => {
-      const runtime = await buildRuntime(files);
-      try {
-        const target = await resolveTarget(files, inv);
-        const [opRaw, firstRaw, secondRaw] = inv.args.map((value) => String(value));
-        const op = opRaw ?? "print";
-        if (normalizeDst(inv)) {
-          throw new Error("--dst is not supported for route commands");
-        }
-        if (op === "print") {
-          const table = await runtime.client.call<RouteTable>(
-            target,
-            "cord.foundation.route",
-            { op: "print" },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-          return inv.options.json === true ? table : formatRouteTable(table, inv.options.verbose === true);
-        }
-        if (op === "add") {
-          return runtime.client.call(
-            target,
-            "cord.foundation.route",
-            {
-              op: "add",
-              targetNodeId: firstRaw,
-              proxyNodeId: secondRaw,
-            },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-        }
-        if (op === "del") {
-          return runtime.client.call(
-            target,
-            "cord.foundation.route",
-            {
-              op: "del",
-              targetNodeId: firstRaw,
-            },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-        }
-        if (op === "deny") {
-          const direction = secondRaw ? firstRaw : "both";
-          const targetNodeId = secondRaw ?? firstRaw;
-          return runtime.client.call(
-            target,
-            "cord.foundation.route",
-            {
-              op: "deny",
-              targetNodeId,
-              direction,
-            },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-        }
-        throw new Error(`Unknown route command ${op}`);
-      } finally {
-        await stopRuntime(runtime);
-      }
-    },
-    targetHelp(
-      "Print or edit the contacted node's local route table",
-      [
-        "coord <node|addr> route print [--verbose]",
-        "coord <node|addr> route add <dst>",
-        "coord <node|addr> route add <dst> <proxy>",
-        "coord <node|addr> route deny [in|out] <dst>",
-        "coord <node|addr> route del <dst>",
-      ],
-      [
-        "./scripts/coord A route print",
-        "./scripts/coord A route print --verbose",
-        "./scripts/coord A route add D P",
-        "./scripts/coord A route deny out C",
-        "./scripts/coord A route del D",
-      ],
-      POLICY_OPTIONS,
-    ),
-  );
-
-  registry.registerCmd(
-    "foundation:proxy",
-    async (inv) => {
-      const runtime = await buildRuntime(files);
-      try {
-        const target = await resolveTarget(files, inv);
-        const [opRaw, dstRaw] = inv.args.map((value) => String(value));
-        const op = opRaw ?? "off";
-        if (normalizeDst(inv)) {
-          throw new Error("--dst is not supported for proxy commands");
-        }
-        if (op === "on") {
-          return runtime.client.call(
-            target,
-            "cord.foundation.proxy",
-            {
-              enabled: true,
-              defaultDstNodeId: dstRaw,
-            },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-        }
-        if (op === "off") {
-          return runtime.client.call(
-            target,
-            "cord.foundation.proxy",
-            {
-              enabled: false,
-            },
-            {
-              timeoutMs: Number(inv.options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS),
-              traceId: typeof inv.options.trace === "string" ? inv.options.trace : undefined,
-              auth: authForCli(runtime.client),
-            },
-          );
-        }
-        throw new Error(`Unknown proxy command ${op}`);
-      } finally {
-        await stopRuntime(runtime);
-      }
-    },
-    targetHelp(
-      "Enable or disable proxy mode on the contacted node",
-      ["coord <node|addr> proxy on [dst]", "coord <node|addr> proxy off"],
-      ["./scripts/coord A proxy on D", "./scripts/coord P proxy on", "./scripts/coord A proxy off"],
-      POLICY_OPTIONS,
-    ),
-  );
 
   const rpcCommand = (
     fullCmd: string,
@@ -1114,25 +984,170 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
     buildParams: (inv: Invocation) => Promise<unknown> | unknown,
     help: HelpSpec,
   ) => {
-    registry.registerCmd(fullCmd, async (inv) => callFoundationExec(files, inv, remoteMethod, await buildParams(inv)), help);
+    registry.registerCmd(fullCmd, async (inv) => callSenderMethod(files, inv, remoteMethod, await buildParams(inv)), help);
   };
+
+  registry.registerCmd(
+    "foundation:whoami",
+    async (inv) => callSenderExec(files, inv, "cord.foundation.whoami", {}),
+    commandHelp("Run whoami on the sender or the selected peer", ["coord -whoami", "coord -whoami @vps", "coord @D -whoami @A"], ["./scripts/coord -whoami", "./scripts/coord -whoami @127.0.0.1:4101", "./scripts/coord @D -whoami @A"]),
+  );
+  registry.registerCmd(
+    "foundation:ping",
+    async (inv) => callSenderExec(files, inv, "cord.foundation.ping", {}),
+    commandHelp("Ping the sender or the selected peer", ["coord -ping @vps", "coord @D -ping @A"], ["./scripts/coord -ping @127.0.0.1:4101", "./scripts/coord @D -ping @A"]),
+  );
+  registry.registerCmd(
+    "foundation:echo",
+    async (inv) =>
+      callSenderExec(files, inv, "cord.foundation.echo", {
+        args: inv.args,
+        named: inv.params,
+        payload: normalizePayload(inv),
+      }),
+    commandHelp(
+      "Echo args or payload on the sender or routed destination",
+      ["coord -echo hello", "coord -echo @A hello", "coord @D -echo @A @./src/cord/playground/samples/bigfile.txt"],
+      ["./scripts/coord -echo local test", "./scripts/coord -echo @vps hello", "./scripts/coord @D -echo @A @./src/cord/playground/samples/bigfile.txt"],
+    ),
+  );
+  registry.registerCmd(
+    "foundation:sleep",
+    async (inv) =>
+      callSenderExec(files, inv, "cord.foundation.sleep", {
+        ms: Number(inv.params.ms ?? inv.args[0] ?? 0),
+      }),
+    commandHelp("Sleep on the sender or routed destination", ["coord -sleep 200", "coord @D -sleep @A 200"], ["./scripts/coord -sleep 50", "./scripts/coord @D -sleep @A 50"]),
+  );
+  registry.registerCmd(
+    "foundation:peers",
+    async (inv) => {
+      const result = await callSenderExec(files, inv, "cord.foundation.peers", {});
+      return inv.options.json === true ? result : formatPeerTable(result as Awaited<ReturnType<typeof callSenderMethod>> & { nodeId: string; entries: Array<{ nodeId: string; via: string; ways: string; ttlRemainingMs: number | null; state: string }> });
+    },
+    commandHelp("Show learned peers on the sender or routed destination", ["coord -peers", "coord -peers @P"], ["./scripts/coord -peers", "./scripts/coord -peers @P"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "foundation:routes",
+    async (inv) => {
+      const result = await callSenderExec(files, inv, "cord.foundation.routes", {});
+      return inv.options.json === true ? result : formatRouteTable(result as RouteTable);
+    },
+    commandHelp("Show effective routes on the sender or routed destination", ["coord -routes", "coord -routes @P"], ["./scripts/coord -routes", "./scripts/coord -routes @P"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "foundation:connect",
+    async (inv) => {
+      if (inv.target.kind !== "node" && inv.target.kind !== "addr") {
+        throw new Error("connect requires @node or @host:port");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.connect", {
+        target: normalizeExecTarget(inv.target),
+        ttlMs: typeof inv.params.ttl === "number" ? Number(inv.params.ttl) * 1000 : typeof inv.options.ttl === "number" ? Number(inv.options.ttl) * 1000 : 0,
+      });
+    },
+    commandHelp("Open a reverse connection from the sender to a direct peer", ["coord -connect @157.250.198.83:4104 --ttl=0"], ["./scripts/coord -connect @127.0.0.1:4101 --ttl=0"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "foundation:disconnect",
+    async (inv) => {
+      if (inv.target.kind !== "node") {
+        throw new Error("disconnect requires @node");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.disconnect", {
+        targetNodeId: inv.target.value,
+      });
+    },
+    commandHelp("Close a reverse connection or drop a reverse peer session", ["coord -disconnect @P"], ["./scripts/coord -disconnect @P"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "foundation:learn",
+    async (inv) => {
+      if (inv.target.kind !== "node" && inv.target.kind !== "addr") {
+        throw new Error("learn requires @node or @host:port");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.learn", {
+        target: normalizeExecTarget(inv.target),
+      });
+    },
+    commandHelp("Import suggested peers from a remote node", ["coord -learn @P"], ["./scripts/coord -learn @P"], POLICY_OPTIONS),
+  );
+
+  registry.registerCmd(
+    "route:add",
+    async (inv) => {
+      if (inv.target.kind !== "node") {
+        throw new Error("route:add requires a destination like @A");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.route", {
+        op: "add",
+        targetNodeId: inv.target.value,
+        proxyNodeId: inv.args[0] ? normalizeNodeArg(inv.args[0]) : undefined,
+      });
+    },
+    commandHelp("Add an explicit route on the sender", ["coord @D -route:add @A @P", "coord -route:add @B"], ["./scripts/coord @D -route:add @A @P"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "route:del",
+    async (inv) => {
+      if (inv.target.kind !== "node") {
+        throw new Error("route:del requires a destination like @A");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.route", {
+        op: "del",
+        targetNodeId: inv.target.value,
+      });
+    },
+    commandHelp("Delete an explicit route on the sender", ["coord @D -route:del @A"], ["./scripts/coord @D -route:del @A"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "route:deny",
+    async (inv) => {
+      if (inv.target.kind !== "node") {
+        throw new Error("route:deny requires a destination like @A");
+      }
+      return callSenderMethod(files, inv, "cord.foundation.route", {
+        op: "deny",
+        targetNodeId: inv.target.value,
+        direction: String(inv.args[0] ?? "both"),
+      });
+    },
+    commandHelp("Deny inbound or outbound direct connectivity on the sender", ["coord @A -route:deny @C out", "coord @A -route:deny @C"], ["./scripts/coord @A -route:deny @C out"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "proxy:on",
+    async (inv) =>
+      callSenderMethod(files, inv, "cord.foundation.proxy", {
+        enabled: true,
+        defaultDstNodeId: inv.target.kind === "node" ? inv.target.value : undefined,
+      }),
+    commandHelp("Enable proxy mode on the sender", ["coord -proxy:on @D"], ["./scripts/coord -proxy:on @D"], POLICY_OPTIONS),
+  );
+  registry.registerCmd(
+    "proxy:off",
+    async (inv) =>
+      callSenderMethod(files, inv, "cord.foundation.proxy", {
+        enabled: false,
+      }),
+    commandHelp("Disable proxy mode on the sender", ["coord -proxy:off"], ["./scripts/coord -proxy:off"], POLICY_OPTIONS),
+  );
 
   rpcCommand(
     "cluster:create",
     "cord.cluster.create",
     (inv) => ({
-      clusterId: String(inv.params.clusterId ?? inv.args[0]),
+      clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])),
       name: inv.params.name,
       props: inv.params.props,
     }),
-    targetHelp("Create a cluster", "coord <node> cluster:create clusterId=offline", ["./scripts/coord A cluster:create clusterId=offline"]),
+    commandHelp("Create a cluster on the sender", "coord -cluster:create %offline", ["./scripts/coord -cluster:create %offline"]),
   );
   rpcCommand(
     "cluster:join",
     "cord.cluster.join",
     async (inv) => ({
-      clusterId: String(inv.params.clusterId ?? inv.args[0]),
-      nodeId: inv.target.kind === "node" ? inv.target.value : String(inv.params.nodeId ?? inv.args[1]),
+      clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])),
+      nodeId: (await resolveSender(files, inv)).nodeId ?? String(inv.params.nodeId ?? "unknown"),
       role: {
         proxyOnly: inv.params.proxyOnly === true,
         canSend: inv.params.canSend !== false,
@@ -1145,53 +1160,36 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
         ...(typeof inv.params.props === "object" && inv.params.props !== null ? (inv.params.props as Record<string, unknown>) : {}),
       },
     } satisfies ClusterNodeConfig),
-    targetHelp("Join a cluster", "coord <node> cluster:join clusterId=offline", ["./scripts/coord A cluster:join clusterId=offline"]),
+    commandHelp("Join the sender to a cluster", "coord -cluster:join %offline", ["./scripts/coord -cluster:join %offline"]),
   );
   rpcCommand(
     "cluster:leave",
     "cord.cluster.leave",
-    (inv) => ({ clusterId: String(inv.params.clusterId ?? inv.args[0]) }),
-    targetHelp("Leave a cluster", "coord <node> cluster:leave clusterId=offline", ["./scripts/coord A cluster:leave clusterId=offline"]),
+    (inv) => ({ clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])) }),
+    commandHelp("Leave a cluster", "coord -cluster:leave %offline", ["./scripts/coord -cluster:leave %offline"]),
   );
   rpcCommand(
-    "cluster:listNodes",
+    "cluster:nodes",
     "cord.cluster.listNodes",
     (inv) => ({ clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])) }),
-    targetHelp("List cluster nodes", "coord <node> cluster:listNodes clusterId=offline", ["./scripts/coord A cluster:listNodes clusterId=offline"]),
+    commandHelp("List nodes in a cluster", "coord -cluster:nodes %offline", ["./scripts/coord -cluster:nodes %offline"]),
   );
   rpcCommand(
-    "cluster:execOnCluster",
+    "cluster:exec",
     "cord.cluster.execOnCluster",
     (inv) => ({
       clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])),
-      method: String(inv.params.method ?? inv.args[1] ?? "cord.foundation.whoami"),
+      method: String(inv.params.method ?? "cord.foundation.whoami"),
       params: typeof inv.params.payload === "object" ? inv.params.payload : {},
       opts: {
-        parallel:
-          typeof inv.options.parallel === "number"
-            ? inv.options.parallel
-            : typeof inv.params.parallel === "number"
-              ? inv.params.parallel
-              : undefined,
-        timeoutMs:
-          typeof inv.options.timeoutMs === "number"
-            ? inv.options.timeoutMs
-            : typeof inv.params.timeoutMs === "number"
-              ? inv.params.timeoutMs
-              : undefined,
-        bestEffort: inv.options.bestEffort === true || inv.params.bestEffort === true ? true : undefined,
+        parallel: typeof inv.options.parallel === "number" ? inv.options.parallel : undefined,
+        timeoutMs: typeof inv.options.timeoutMs === "number" ? inv.options.timeoutMs : undefined,
+        bestEffort: inv.options.bestEffort === true ? true : undefined,
       },
     }),
-    targetHelp(
-      "Fan out a command across a cluster",
-      [
-        "coord <node|#cluster> cluster:execOnCluster clusterId=offline method=cord.foundation.whoami",
-        "coord #offline --parallel=5 --bestEffort cluster:execOnCluster method=cord.foundation.whoami",
-      ],
-      ["./scripts/coord #offline cluster:execOnCluster method=cord.foundation.whoami"],
-      FANOUT_OPTIONS,
-    ),
+    commandHelp("Fan out a method across a cluster", ["coord -cluster:exec %offline method=cord.foundation.whoami"], ["./scripts/coord -cluster:exec %offline method=cord.foundation.whoami"], FANOUT_OPTIONS),
   );
+
   rpcCommand(
     "iam:defineCommand",
     "cord.iam.defineCommand",
@@ -1203,7 +1201,7 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
         description: String(inv.params.description ?? inv.params.title ?? inv.params.commandId),
       } satisfies CommandDefinition,
     }),
-    targetHelp("Define a command in IAM", "coord <node> iam:defineCommand ns=default commandId=cmd:test title='Test'", ["./scripts/coord A iam:defineCommand ns=default commandId=cmd:test title='Test'"]),
+    commandHelp("Define a command in IAM", "coord -iam:defineCommand commandId=cmd:test title=Test", ["./scripts/coord -iam:defineCommand commandId=cmd:test title=Test"]),
   );
   rpcCommand(
     "iam:grant",
@@ -1218,7 +1216,7 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
         scope: inv.params.scope,
       } satisfies CommandGrant,
     }),
-    targetHelp("Grant command access", "coord <node> iam:grant ns=default subject=grp:staff commandId=cmd:test allow=true", ["./scripts/coord A iam:grant ns=default subject=grp:staff commandId=cmd:test allow=true"]),
+    commandHelp("Grant command access", "coord -iam:grant subject=grp:staff commandId=cmd:test allow=true", ["./scripts/coord -iam:grant subject=grp:staff commandId=cmd:test allow=true"]),
   );
   rpcCommand(
     "iam:canInvoke",
@@ -1232,22 +1230,22 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
       commandId: String(inv.params.commandId ?? inv.args[1]),
       requestedMask: typeof inv.params.mask === "number" ? inv.params.mask : undefined,
     }),
-    targetHelp("Check whether a user can invoke a command", "coord <node> iam:canInvoke ns=default userId=user:guest commandId=cmd:test", ["./scripts/coord A iam:canInvoke ns=default userId=user:guest commandId=cmd:test"]),
+    commandHelp("Check whether a user can invoke a command", "coord -iam:canInvoke userId=user:guest commandId=cmd:test", ["./scripts/coord -iam:canInvoke userId=user:guest commandId=cmd:test"]),
   );
   rpcCommand(
     "users:ensureGuest",
     "cord.users.ensureGuest",
     (inv) => ({ ns: String(inv.params.ns ?? "default") }),
-    targetHelp("Ensure the guest user exists", "coord <node> users:ensureGuest ns=default", ["./scripts/coord A users:ensureGuest ns=default"]),
+    commandHelp("Ensure the guest user exists", "coord -users:ensureGuest", ["./scripts/coord -users:ensureGuest"]),
   );
   rpcCommand(
     "bootstrap:register_unallocated",
     "cord.bootstrap.register_unallocated",
     async (inv) => {
-      if (inv.target.kind === "node") {
-        const nodeId = inv.target.value;
+      const sender = await resolveSender(files, inv);
+      if ("nodeId" in sender) {
         const nodes = await loadNodes(files);
-        const record = nodes.find((item) => item.nodeId === nodeId);
+        const record = nodes.find((item) => item.nodeId === sender.nodeId);
         if (record) {
           return {
             nodeId: record.nodeId,
@@ -1258,19 +1256,17 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
         }
       }
       return {
-        nodeId: String(inv.params.nodeId ?? "unknown"),
+        nodeId: "unknown",
         nodeEpoch: "cli-register",
-        addrs: typeof inv.params.addr === "string" ? [inv.params.addr] : undefined,
-        props: inv.params.props,
       } satisfies NodeInfo;
     },
-    targetHelp("Register an unallocated node", "coord <node> bootstrap:register_unallocated", ["./scripts/coord A bootstrap:register_unallocated"]),
+    commandHelp("Register the sender as unallocated", "coord -bootstrap:register_unallocated", ["./scripts/coord -bootstrap:register_unallocated"]),
   );
   rpcCommand(
     "bootstrap:list_unallocated",
     "cord.bootstrap.list_unallocated",
     (inv) => ({ ns: String(inv.params.ns ?? "default") }),
-    targetHelp("List unallocated nodes", "coord <node> bootstrap:list_unallocated ns=default", ["./scripts/coord A bootstrap:list_unallocated ns=default"]),
+    commandHelp("List unallocated nodes", "coord -bootstrap:list_unallocated", ["./scripts/coord -bootstrap:list_unallocated"]),
   );
   rpcCommand(
     "election:addShard",
@@ -1282,7 +1278,7 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
         weight: typeof inv.params.weight === "number" ? inv.params.weight : undefined,
       },
     }),
-    targetHelp("Add a shard", "coord <node|#cluster> election:addShard clusterId=offline shardId=orders weight=3", ["./scripts/coord A election:addShard clusterId=offline shardId=orders weight=3"]),
+    commandHelp("Add a shard", "coord -election:addShard %offline shardId=orders weight=3", ["./scripts/coord -election:addShard %offline shardId=orders weight=3"]),
   );
   rpcCommand(
     "election:getLeader",
@@ -1291,7 +1287,7 @@ function registerTargetedCommands(registry: CoordCommandRegistry, files: Playgro
       clusterId: String(inv.params.clusterId ?? (inv.target.kind === "cluster" ? inv.target.value : inv.args[0])),
       shardId: String(inv.params.shardId ?? inv.args[1] ?? "default"),
     }),
-    targetHelp("Get shard leader", "coord <node|#cluster> election:getLeader clusterId=offline shardId=default", ["./scripts/coord A election:getLeader clusterId=offline shardId=default"]),
+    commandHelp("Get shard leader", "coord -election:getLeader %offline shardId=default", ["./scripts/coord -election:getLeader %offline shardId=default"]),
   );
 }
 

@@ -21,6 +21,7 @@ import type {
   FoundationNode,
   GroupManager,
   NodeInfo,
+  PeerTable,
   PermissionCatalog,
   RouteDirection,
   RouteTable,
@@ -167,8 +168,24 @@ export class CordNode
     return this.foundation.discover(opts);
   }
 
+  getPeerTable(opts?: { verbose?: boolean }): Promise<PeerTable> {
+    return this.foundation.getPeerTable(opts);
+  }
+
   getRouteTable(opts?: { verbose?: boolean }): Promise<RouteTable> {
     return this.foundation.getRouteTable(opts);
+  }
+
+  connect(target: RpcTarget, opts?: { ttlMs?: number }): Promise<{ ok: true; peer: NodeInfo; ttlMs: number | null }> {
+    return this.foundation.connect(target, opts);
+  }
+
+  disconnect(targetNodeId: string): Promise<{ ok: true; nodeId: string }> {
+    return this.foundation.disconnect(targetNodeId);
+  }
+
+  learn(target: RpcTarget): Promise<{ ok: true; learned: string[]; skipped: string[] }> {
+    return this.foundation.learn(target);
   }
 
   setRoute(targetNodeId: string, proxyNodeId?: string): Promise<void> {

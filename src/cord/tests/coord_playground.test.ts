@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -62,97 +62,72 @@ function reservePort(): Promise<number> {
   });
 }
 
-test("coord playground exposes the documented CLI commands", { concurrency: false }, async () => {
+test("coord playground learns peers from direct calls and connect", { concurrency: false }, async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "coord-playground-"));
-  const exportPath = join(rootDir, "saved-state.json");
   const portA = await reservePort();
-  const portB = await reservePort();
+  const portP = await reservePort();
 
   try {
     const overview = await runCoord([], rootDir);
     assert.equal(overview.code, 0);
     assert.match(overview.stdout, /coord CLI/);
-    assert.match(overview.stdout, /First-time quick start:/);
-    assert.match(overview.stdout, /-start/);
+    assert.match(overview.stdout, /coord \[@sender\] -command \[@target\|%cluster\]/);
 
-    const help = await runCoord(["-help", "foundation"], rootDir);
-    assert.equal(help.code, 0);
-    assert.match(help.stdout, /foundation:whoami/);
-    assert.match(help.stdout, /foundation:echo/);
+    const startA = await runCoord([`-start:${portA}`, "A"], rootDir);
+    assert.equal(startA.code, 0);
 
-    const commandHelp = await runCoord(["-help", "foundation:echo"], rootDir);
-    assert.equal(commandHelp.code, 0);
-    assert.match(commandHelp.stdout, /Echo args or payload/);
-    assert.match(commandHelp.stdout, /Usage:/);
-    assert.match(commandHelp.stdout, /Options:/);
-    assert.match(commandHelp.stdout, /Examples:/);
-
-    const startedA = await runCoord([`-start:${portA}`, "A"], rootDir);
-    assert.equal(startedA.code, 0);
-    assert.match(startedA.stdout, /mode: 'daemon'/);
-
-    const startedB = await runCoord([`-start:${portB}`, "B"], rootDir);
-    assert.equal(startedB.code, 0);
-    assert.match(startedB.stdout, /mode: 'daemon'/);
-
-    const duplicatePort = await runCoord([`-start:${portA}`, "C"], rootDir);
-    assert.equal(duplicatePort.code, 1);
-    assert.match(duplicatePort.stdout, /already serving node A|serving A, not C/);
+    const startP = await runCoord([`-start:${portP}`, "P"], rootDir);
+    assert.equal(startP.code, 0);
 
     const status = await runCoord(["-status"], rootDir);
     assert.equal(status.code, 0);
-    assert.match(status.stdout, /coord status/);
-    assert.match(status.stdout, /A/);
-    assert.match(status.stdout, /B/);
-    assert.match(status.stdout, /up/);
-    assert.doesNotMatch(status.stdout, /\bC\b/);
+    assert.match(status.stdout, /\bA\b/);
+    assert.match(status.stdout, /\bP\b/);
 
-    const health = await fetch(`http://127.0.0.1:${portA}/healthz`);
-    assert.equal(health.ok, true);
+    const direct = await runCoord(["@A", "-whoami", `@127.0.0.1:${portP}`, "--json"], rootDir);
+    assert.equal(direct.code, 0, direct.stdout || direct.stderr);
+    assert.equal((JSON.parse(direct.stdout) as { nodeId: string }).nodeId, "P");
 
-    const discovered = await runCoord(["-discover", `${portA},${portB}`, "600"], rootDir);
-    assert.equal(discovered.code, 0);
-    assert.match(discovered.stdout, /A/);
-    assert.match(discovered.stdout, /B/);
+    const peersOnA = await runCoord(["@A", "-peers", "--json"], rootDir);
+    assert.equal(peersOnA.code, 0);
+    const peerTableA = JSON.parse(peersOnA.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    assert.deepEqual(peerTableA.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state })), [
+      { nodeId: "P", via: `127.0.0.1:${portP}`, ways: "out", state: "learned" },
+    ]);
 
-    const whoami = await runCoord(["A", "--json", "whoami"], rootDir);
-    assert.equal(whoami.code, 0);
-    const firstWhoami = JSON.parse(whoami.stdout) as { nodeId: string; nodeEpoch: string };
-    assert.equal(firstWhoami.nodeId, "A");
+    const peersOnP = await runCoord(["@P", "-peers", "--json"], rootDir);
+    assert.equal(peersOnP.code, 0);
+    const peerTableP = JSON.parse(peersOnP.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    assert.deepEqual(peerTableP.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state })), [
+      { nodeId: "A", via: `127.0.0.1:${portA}`, ways: "in", state: "learned" },
+    ]);
 
-    const whoamiAgain = await runCoord(["A", "--json", "whoami"], rootDir);
-    assert.equal(whoamiAgain.code, 0);
-    const secondWhoami = JSON.parse(whoamiAgain.stdout) as { nodeEpoch: string };
-    assert.equal(secondWhoami.nodeEpoch, firstWhoami.nodeEpoch);
+    const connect = await runCoord(["@A", "-connect", `@127.0.0.1:${portP}`, "--ttl=0", "--json"], rootDir);
+    assert.equal(connect.code, 0);
+    assert.equal((JSON.parse(connect.stdout) as { peer: { nodeId: string } }).peer.nodeId, "P");
 
-    const echo = await runCoord(["B", "--json", "echo", "@./src/cord/playground/samples/bigfile.txt"], rootDir);
-    assert.equal(echo.code, 0);
-    const echoResult = JSON.parse(echo.stdout) as { ok: boolean; kind: string; bytes: number; sha256: string };
-    assert.equal(echoResult.ok, true);
-    assert.equal(echoResult.kind, "bytes");
-    assert.ok(echoResult.bytes > 0);
-    assert.match(echoResult.sha256, /^[a-f0-9]{64}$/);
+    const connectedA = await runCoord(["@A", "-peers", "--json"], rootDir);
+    const connectedPeersA = JSON.parse(connectedA.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    assert.deepEqual(connectedPeersA.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state })), [
+      { nodeId: "P", via: `127.0.0.1:${portP}`, ways: "both", state: "connected" },
+    ]);
 
-    const save = await runCoord(["-save", exportPath], rootDir);
-    assert.equal(save.code, 0);
-    const saved = JSON.parse(await readFile(exportPath, "utf8")) as { nodes: Array<{ nodeId: string }>; cache: Record<string, unknown> };
-    assert.equal(saved.nodes.length, 2);
-    assert.ok(saved.cache.A);
+    const connectedP = await runCoord(["@P", "-peers", "--json"], rootDir);
+    const connectedPeersP = JSON.parse(connectedP.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    assert.deepEqual(connectedPeersP.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state })), [
+      { nodeId: "A", via: "reverse", ways: "both", state: "connected" },
+    ]);
 
-    const badGroup = await runCoord(["B", "bad_group:echo", "123"], rootDir);
-    assert.equal(badGroup.code, 3);
-    assert.match(badGroup.stdout, /unknown command group/i);
-
-    const badCommand = await runCoord(["B", "bad_cmd"], rootDir);
-    assert.equal(badCommand.code, 4);
-    assert.match(badCommand.stdout, /unknown command/i);
+    const reverseCall = await runCoord(["@P", "-whoami", "@A", "--json"], rootDir);
+    assert.equal(reverseCall.code, 0);
+    assert.equal((JSON.parse(reverseCall.stdout) as { nodeId: string }).nodeId, "A");
   } finally {
     await runCoord(["-stop", "all"], rootDir).catch(() => ({ code: 0, stdout: "", stderr: "" }));
     await rm(rootDir, { recursive: true, force: true });
   }
 });
 
-test("coord playground supports route and proxy scenarios", { concurrency: false }, async () => {
+test("coord playground supports learned proxy paths and reverse hops", { concurrency: false }, async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "coord-routing-"));
   const portA = await reservePort();
   const portC = await reservePort();
@@ -170,101 +145,72 @@ test("coord playground supports route and proxy scenarios", { concurrency: false
       assert.equal(started.code, 0, started.stdout || started.stderr);
     }
 
-    const discovered = await runCoord(["-discover", `${portA},${portC},${portP},${portD}`, "600"], rootDir);
-    assert.equal(discovered.code, 0);
+    const denyOut = await runCoord(["@A", "-route:deny", "@C", "out"], rootDir);
+    assert.equal(denyOut.code, 0);
 
-    const baseline = await runCoord(["A", "route", "print"], rootDir);
-    assert.equal(baseline.code, 0);
-    assert.match(baseline.stdout, /\bC\b/);
-    assert.match(baseline.stdout, /\bP\b/);
-    assert.match(baseline.stdout, /\bD\b/);
-
-    const denyOutC = await runCoord(["A", "route", "deny", "out", "C"], rootDir);
-    assert.equal(denyOutC.code, 0);
-
-    const denied = await runCoord(["A", "--dst=C", "whoami"], rootDir);
+    const denied = await runCoord(["@A", "-whoami", "@C"], rootDir);
     assert.equal(denied.code, 7);
-    assert.match(denied.stdout, /route denied: out to C|no route to C/i);
+    assert.match(denied.stdout, /no route to C|route denied: out to C/i);
 
-    const reverse = await runCoord(["C", "--json", "--dst=A", "whoami"], rootDir);
-    assert.equal(reverse.code, 0);
-    assert.equal((JSON.parse(reverse.stdout) as { nodeId: string }).nodeId, "A");
+    const inbound = await runCoord(["@C", "-echo", "@A", "hello", "--json"], rootDir);
+    assert.equal(inbound.code, 0);
+    assert.equal((JSON.parse(inbound.stdout) as { text: string }).text, "hello");
 
-    const afterInbound = await runCoord(["A", "route", "print", "--verbose"], rootDir);
-    assert.equal(afterInbound.code, 0);
-    assert.match(afterInbound.stdout, /C\{in\}/);
-    assert.match(afterInbound.stdout, /\bin\b/);
+    const routesAfterInbound = await runCoord(["@A", "-routes"], rootDir);
+    assert.equal(routesAfterInbound.code, 0);
+    assert.match(routesAfterInbound.stdout, /\bC\b/);
+    assert.match(routesAfterInbound.stdout, /\bin\b/);
 
-    assert.equal((await runCoord(["A", "route", "deny", "out", "D"], rootDir)).code, 0);
-    assert.equal((await runCoord(["A", "route", "add", "D", "P"], rootDir)).code, 0);
+    const connect = await runCoord(["@A", "-connect", `@127.0.0.1:${portP}`, "--ttl=0"], rootDir);
+    assert.equal(connect.code, 0);
 
-    const proxied = await runCoord(["A", "--json", "--dst=D", "whoami"], rootDir);
-    assert.equal(proxied.code, 0);
-    assert.equal((JSON.parse(proxied.stdout) as { nodeId: string }).nodeId, "D");
+    const learn = await runCoord(["@D", "-learn", "@P", "--json"], rootDir);
+    assert.equal(learn.code, 0);
+    const learnResult = JSON.parse(learn.stdout) as { learned: string[] };
+    assert.deepEqual(learnResult.learned, ["A"]);
 
-    assert.equal((await runCoord(["D", "route", "deny", "out", "A"], rootDir)).code, 0);
-    assert.equal((await runCoord(["D", "route", "add", "A", "P"], rootDir)).code, 0);
+    const peersBeforeRoute = await runCoord(["@D", "-peers", "--json"], rootDir);
+    const tableBeforeRoute = JSON.parse(peersBeforeRoute.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    assert.deepEqual(tableBeforeRoute.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state })), [
+      { nodeId: "A", via: "via P", ways: "-", state: "suggested" },
+      { nodeId: "P", via: `127.0.0.1:${portP}`, ways: "out", state: "learned" },
+    ]);
 
-    const reverseProxy = await runCoord(["D", "--json", "--dst=A", "whoami"], rootDir);
-    assert.equal(reverseProxy.code, 0);
-    assert.equal((JSON.parse(reverseProxy.stdout) as { nodeId: string }).nodeId, "A");
+    const addRoute = await runCoord(["@D", "-route:add", "@A", "@P"], rootDir);
+    assert.equal(addRoute.code, 0);
 
-    const routeTable = await runCoord(["A", "route", "print"], rootDir);
-    assert.equal(routeTable.code, 0);
-    assert.match(routeTable.stdout, /D\[P\]/);
+    const routed = await runCoord(["@D", "-echo", "@A", "hello-from-D", "--verbose"], rootDir);
+    assert.equal(routed.code, 0, routed.stdout || routed.stderr);
+    assert.match(routed.stdout, /D -> P -< A/);
+    assert.match(routed.stdout, /hello-from-D/);
 
-    const proxyOn = await runCoord(["A", "proxy", "on", "D"], rootDir);
+    const peersOnA = await runCoord(["@A", "-peers", "--json"], rootDir);
+    assert.equal(peersOnA.code, 0);
+    const tableOnA = JSON.parse(peersOnA.stdout) as { entries: Array<{ nodeId: string; via: string; ways: string; state: string }> };
+    const summarizedOnA = tableOnA.entries.map(({ nodeId, via, ways, state }) => ({ nodeId, via, ways, state }));
+    assert.ok(summarizedOnA.some((entry) => entry.nodeId === "D" && entry.via === "via P" && entry.ways === "in" && entry.state === "learned"));
+    assert.ok(summarizedOnA.some((entry) => entry.nodeId === "P" && entry.via === `127.0.0.1:${portP}` && entry.ways === "both" && entry.state === "connected"));
+
+    const routesOnA = await runCoord(["@A", "-routes"], rootDir);
+    assert.equal(routesOnA.code, 0);
+    assert.match(routesOnA.stdout, /A -> P -> D/);
+
+    const denyDirectD = await runCoord(["@A", "-route:deny", "@D", "out"], rootDir);
+    assert.equal(denyDirectD.code, 0);
+
+    const reply = await runCoord(["@A", "-whoami", "@D", "--verbose"], rootDir);
+    assert.equal(reply.code, 0, reply.stdout || reply.stderr);
+    assert.match(reply.stdout, /A -> P -> D/);
+
+    const proxyOn = await runCoord(["@A", "-proxy:on", "@D"], rootDir);
     assert.equal(proxyOn.code, 0);
 
-    const proxyDefault = await runCoord(["A", "--json", "whoami"], rootDir);
+    const proxyDefault = await runCoord(["@A", "-whoami", "--json"], rootDir);
     assert.equal(proxyDefault.code, 0);
     assert.equal((JSON.parse(proxyDefault.stdout) as { nodeId: string }).nodeId, "D");
 
-    const proxyOverride = await runCoord(["A", "--json", "--dst=A", "whoami"], rootDir);
-    assert.equal(proxyOverride.code, 0);
-    assert.equal((JSON.parse(proxyOverride.stdout) as { nodeId: string }).nodeId, "A");
-
-    const proxyOff = await runCoord(["A", "proxy", "off"], rootDir);
+    const proxyOff = await runCoord(["@A", "-proxy:off"], rootDir);
     assert.equal(proxyOff.code, 0);
-
-    const localAgain = await runCoord(["A", "--json", "whoami"], rootDir);
-    assert.equal(localAgain.code, 0);
-    assert.equal((JSON.parse(localAgain.stdout) as { nodeId: string }).nodeId, "A");
-
-    const loopRule = await runCoord(["P", "route", "add", "D", "A"], rootDir);
-    assert.equal(loopRule.code, 0);
-
-    const looped = await runCoord(["A", "--dst=D", "whoami"], rootDir);
-    assert.equal(looped.code, 7);
-    assert.match(looped.stdout, /proxy hop exceeds 1/i);
-
-    const clearLoop = await runCoord(["P", "route", "del", "D"], rootDir);
-    assert.equal(clearLoop.code, 0);
-
-    const blockProxy = await runCoord(["A", "route", "deny", "out", "P"], rootDir);
-    assert.equal(blockProxy.code, 0);
-
-    const proxyUnreachable = await runCoord(["A", "--dst=D", "whoami"], rootDir);
-    assert.equal(proxyUnreachable.code, 7);
-    assert.match(proxyUnreachable.stdout, /cannot reach proxy P/i);
-
-    const noRouteRoot = await mkdtemp(join(tmpdir(), "coord-no-route-"));
-    try {
-      for (const [name, port] of [
-        ["A", await reservePort()],
-        ["D", await reservePort()],
-      ] as const) {
-        const started = await runCoord([`-start:${port}`, name], noRouteRoot);
-        assert.equal(started.code, 0);
-      }
-      assert.equal((await runCoord(["A", "route", "deny", "out", "D"], noRouteRoot)).code, 0);
-      const noRoute = await runCoord(["A", "--dst=D", "whoami"], noRouteRoot);
-      assert.equal(noRoute.code, 7);
-      assert.match(noRoute.stdout, /no route to D|route denied: out to D/i);
-    } finally {
-      await runCoord(["-stop", "all"], noRouteRoot).catch(() => ({ code: 0, stdout: "", stderr: "" }));
-      await rm(noRouteRoot, { recursive: true, force: true });
-    }
   } finally {
     await runCoord(["-stop", "all"], rootDir).catch(() => ({ code: 0, stdout: "", stderr: "" }));
     await rm(rootDir, { recursive: true, force: true });

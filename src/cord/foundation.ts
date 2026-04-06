@@ -5,6 +5,8 @@ import type {
   CommandHandler,
   FoundationNode,
   NodeInfo,
+  PeerEntry,
+  PeerTable,
   RouteDirection,
   RouteEntry,
   RouteTable,
@@ -33,26 +35,62 @@ type PublishedNodeRecord = NodeInfo & {
   pid: number;
 };
 
+type PeerStateRecord = {
+  nodeId: string;
+  nodeEpoch?: string;
+  addrs?: string[];
+  props?: unknown;
+  directAddr?: string;
+  viaNodeId?: string;
+  viaDetail?: "direct" | "reverse";
+  suggested?: boolean;
+  connected?: boolean;
+  expiresAtMs?: number | null;
+  lastSeenMs?: number;
+  lastInboundMs?: number;
+  lastOutboundMs?: number;
+};
+
 type RouteStateRecord = {
-  version: 1;
+  version: 2;
   routes: Record<string, { proxyNodeId?: string }>;
   deny: Record<string, { in?: boolean; out?: boolean }>;
   proxyMode: {
     enabled: boolean;
     defaultDstNodeId?: string;
   };
-  observations: Record<string, { lastInboundMs?: number; lastOutboundMs?: number }>;
+  peers: Record<string, PeerStateRecord>;
+};
+
+type ExecTarget = { kind: "node"; value: string } | { kind: "addr"; value: string };
+
+type RouteHop = {
+  from: string;
+  to: string;
+  kind: "direct" | "reverse";
+};
+
+type PeerSummary = {
+  nodeId: string;
+  nodeEpoch?: string;
+  addrs?: string[];
+  props?: unknown;
+  viaKind: "direct" | "proxy" | "reverse" | "unknown";
+  viaValue?: string;
+  viaDetail?: "direct" | "reverse";
+  ways: "out" | "in" | "both" | "-";
+  ttlRemainingMs: number | null;
+  state: "connected" | "learned" | "suggested";
 };
 
 type FoundationExecRequest = {
   method: string;
   params: unknown;
-  dstNodeId?: string;
+  dst?: ExecTarget;
   timeoutMs?: number;
   traceId?: string;
-  verbose?: boolean;
   hopCount?: number;
-  path?: string[];
+  path?: RouteHop[];
 };
 
 type FoundationExecResponse = {
@@ -62,9 +100,82 @@ type FoundationExecResponse = {
     executedNodeId: string;
     mode: "local" | "direct" | "proxy";
     nextHopNodeId: string;
-    proxyNodeId?: string;
     path: string[];
+    hops: RouteHop[];
   };
+};
+
+type ReverseOpenPayload = {
+  ttlMs?: number;
+};
+
+type ReversePollPayload = {
+  sessionId: string;
+  waitMs?: number;
+};
+
+type ReverseReplyPayload = {
+  sessionId: string;
+  requestId: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
+
+type ReverseClosePayload = {
+  sessionId: string;
+};
+
+type ReverseRequest = {
+  requestId: string;
+  method: string;
+  params: unknown;
+  auth?: RpcAuth;
+  traceId?: string;
+  srcNodeId: string;
+  srcNodeInfo: NodeInfo;
+  originNodeId?: string;
+};
+
+type ReversePollResponse = { kind: "noop" } | { kind: "request"; request: ReverseRequest };
+
+type ReverseIncomingSession = {
+  sessionId: string;
+  peer: NodeInfo;
+  expiresAtMs: number | null;
+  lastSeenMs: number;
+  queue: ReverseRequest[];
+  waiters: Array<(response: ReversePollResponse) => void>;
+  pending: Map<
+    string,
+    {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >;
+};
+
+type ReverseOutgoingConnection = {
+  remoteNodeId: string;
+  remoteAddr: string;
+  sessionId: string;
+  expiresAtMs: number | null;
+  stop: boolean;
+};
+
+type RpcHttpResponse<T> = {
+  ok?: boolean;
+  result?: T;
+  node?: NodeInfo;
+  error?: { message?: string };
+};
+
+type CallResult<T> = {
+  result: T;
+  peer: NodeInfo;
+  via: "local" | "direct" | "reverse";
+  addr?: string;
 };
 
 function nodeDirectoryKey(nodeId: string): string {
@@ -77,13 +188,13 @@ function routeStateKey(nodeId: string): string {
 
 function emptyRouteState(): RouteStateRecord {
   return {
-    version: 1,
+    version: 2,
     routes: {},
     deny: {},
     proxyMode: {
       enabled: false,
     },
-    observations: {},
+    peers: {},
   };
 }
 
@@ -98,6 +209,10 @@ function parseAddr(addr: string): { host: string; port: number } {
     throw new Error(`Invalid listen addr "${addr}"`);
   }
   return { host, port };
+}
+
+function isAddr(addr: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(addr) || /^[A-Za-z0-9_.-]+:\d+$/.test(addr);
 }
 
 function parsePublishedNodeRecord(value: unknown): PublishedNodeRecord | null {
@@ -119,30 +234,67 @@ function parsePublishedNodeRecord(value: unknown): PublishedNodeRecord | null {
   };
 }
 
+function parsePeerStateRecord(nodeId: string, value: unknown): PeerStateRecord {
+  const record = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  return {
+    nodeId,
+    nodeEpoch: typeof record.nodeEpoch === "string" ? record.nodeEpoch : undefined,
+    addrs: Array.isArray(record.addrs) ? record.addrs.filter((item): item is string => typeof item === "string") : undefined,
+    props: record.props,
+    directAddr: typeof record.directAddr === "string" && record.directAddr.length > 0 ? record.directAddr : undefined,
+    viaNodeId: typeof record.viaNodeId === "string" && record.viaNodeId.length > 0 ? record.viaNodeId : undefined,
+    viaDetail: record.viaDetail === "reverse" ? "reverse" : record.viaDetail === "direct" ? "direct" : undefined,
+    suggested: record.suggested === true,
+    connected: record.connected === true,
+    expiresAtMs: typeof record.expiresAtMs === "number" ? record.expiresAtMs : record.expiresAtMs === null ? null : undefined,
+    lastSeenMs: typeof record.lastSeenMs === "number" ? record.lastSeenMs : undefined,
+    lastInboundMs: typeof record.lastInboundMs === "number" ? record.lastInboundMs : undefined,
+    lastOutboundMs: typeof record.lastOutboundMs === "number" ? record.lastOutboundMs : undefined,
+  };
+}
+
 function parseRouteStateRecord(value: unknown): RouteStateRecord {
   const base = emptyRouteState();
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return base;
   }
   const record = value as Record<string, unknown>;
-  const routesValue = typeof record.routes === "object" && record.routes !== null && !Array.isArray(record.routes) ? record.routes as Record<string, unknown> : {};
-  const denyValue = typeof record.deny === "object" && record.deny !== null && !Array.isArray(record.deny) ? record.deny as Record<string, unknown> : {};
-  const observationsValue =
-    typeof record.observations === "object" && record.observations !== null && !Array.isArray(record.observations)
-      ? record.observations as Record<string, unknown>
-      : {};
+  const routesValue = typeof record.routes === "object" && record.routes !== null && !Array.isArray(record.routes) ? (record.routes as Record<string, unknown>) : {};
+  const denyValue = typeof record.deny === "object" && record.deny !== null && !Array.isArray(record.deny) ? (record.deny as Record<string, unknown>) : {};
   const proxyModeValue =
     typeof record.proxyMode === "object" && record.proxyMode !== null && !Array.isArray(record.proxyMode)
-      ? record.proxyMode as Record<string, unknown>
+      ? (record.proxyMode as Record<string, unknown>)
+      : {};
+  const peersValue = typeof record.peers === "object" && record.peers !== null && !Array.isArray(record.peers) ? (record.peers as Record<string, unknown>) : {};
+  const observationsValue =
+    typeof record.observations === "object" && record.observations !== null && !Array.isArray(record.observations)
+      ? (record.observations as Record<string, unknown>)
       : {};
 
+  const peers = Object.fromEntries(
+    Object.entries(peersValue)
+      .filter(([nodeId]) => typeof nodeId === "string" && nodeId.length > 0)
+      .map(([nodeId, peer]) => [nodeId, parsePeerStateRecord(nodeId, peer)] as const),
+  );
+
+  for (const [nodeId, observation] of Object.entries(observationsValue)) {
+    const source = typeof observation === "object" && observation !== null && !Array.isArray(observation) ? (observation as Record<string, unknown>) : {};
+    const current = peers[nodeId] ?? {
+      nodeId,
+      suggested: false,
+    };
+    current.lastInboundMs = typeof source.lastInboundMs === "number" ? source.lastInboundMs : current.lastInboundMs;
+    current.lastOutboundMs = typeof source.lastOutboundMs === "number" ? source.lastOutboundMs : current.lastOutboundMs;
+    peers[nodeId] = current;
+  }
+
   return {
-    version: 1,
+    version: 2,
     routes: Object.fromEntries(
       Object.entries(routesValue)
         .filter(([nodeId]) => typeof nodeId === "string" && nodeId.length > 0)
         .map(([nodeId, route]) => {
-          const routeRecord = typeof route === "object" && route !== null && !Array.isArray(route) ? route as Record<string, unknown> : {};
+          const routeRecord = typeof route === "object" && route !== null && !Array.isArray(route) ? (route as Record<string, unknown>) : {};
           return [
             nodeId,
             {
@@ -155,7 +307,7 @@ function parseRouteStateRecord(value: unknown): RouteStateRecord {
       Object.entries(denyValue)
         .filter(([nodeId]) => typeof nodeId === "string" && nodeId.length > 0)
         .map(([nodeId, deny]) => {
-          const denyRecord = typeof deny === "object" && deny !== null && !Array.isArray(deny) ? deny as Record<string, unknown> : {};
+          const denyRecord = typeof deny === "object" && deny !== null && !Array.isArray(deny) ? (deny as Record<string, unknown>) : {};
           return [
             nodeId,
             {
@@ -172,21 +324,7 @@ function parseRouteStateRecord(value: unknown): RouteStateRecord {
           ? proxyModeValue.defaultDstNodeId
           : undefined,
     },
-    observations: Object.fromEntries(
-      Object.entries(observationsValue)
-        .filter(([nodeId]) => typeof nodeId === "string" && nodeId.length > 0)
-        .map(([nodeId, observation]) => {
-          const observationRecord =
-            typeof observation === "object" && observation !== null && !Array.isArray(observation) ? observation as Record<string, unknown> : {};
-          return [
-            nodeId,
-            {
-              lastInboundMs: typeof observationRecord.lastInboundMs === "number" ? observationRecord.lastInboundMs : undefined,
-              lastOutboundMs: typeof observationRecord.lastOutboundMs === "number" ? observationRecord.lastOutboundMs : undefined,
-            },
-          ] as const;
-        }),
-    ),
+    peers,
   };
 }
 
@@ -227,16 +365,34 @@ function raceTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   ]);
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isRouteVisibleNodeId(nodeId: string): boolean {
   return nodeId.length > 0 && !nodeId.startsWith("coord-cli-");
 }
 
-function ttlRemaining(timestampMs: number | undefined, ttlMs: number, nowMs: number): number | null {
-  if (!timestampMs) {
-    return null;
+function hopPath(hops: RouteHop[]): string[] {
+  if (hops.length === 0) {
+    return [];
   }
-  const remaining = timestampMs + ttlMs - nowMs;
-  return remaining > 0 ? remaining : null;
+  const parts = [hops[0].from];
+  for (const hop of hops) {
+    parts.push(hop.to);
+  }
+  return parts;
+}
+
+function renderHopPath(hops: RouteHop[], selfNodeId: string, peerNodeId: string): string {
+  if (hops.length === 0) {
+    return selfNodeId === peerNodeId ? selfNodeId : `${selfNodeId} -> ${peerNodeId}`;
+  }
+  let text = hops[0].from;
+  for (const hop of hops) {
+    text += hop.kind === "reverse" ? ` -< ${hop.to}` : ` -> ${hop.to}`;
+  }
+  return text;
 }
 
 export class CordFoundation implements FoundationNode {
@@ -252,6 +408,8 @@ export class CordFoundation implements FoundationNode {
   private readonly listenHttp: boolean;
   private readonly guestWindows = new Map<string, { windowStartMs: number; count: number }>();
   private readonly nodeEpoch: string;
+  private readonly reverseIncoming = new Map<string, ReverseIncomingSession>();
+  private readonly reverseOutgoing = new Map<string, ReverseOutgoingConnection>();
   private httpServer: Server | null = null;
   private started = false;
 
@@ -293,6 +451,14 @@ export class CordFoundation implements FoundationNode {
     if (!this.started) {
       return;
     }
+    for (const outgoing of this.reverseOutgoing.values()) {
+      outgoing.stop = true;
+    }
+    for (const session of this.reverseIncoming.values()) {
+      this.closeIncomingSession(session, "node stopped");
+    }
+    this.reverseOutgoing.clear();
+    this.reverseIncoming.clear();
     if (this.listenHttp) {
       await this.publishNodeDirectory(false);
     }
@@ -326,58 +492,7 @@ export class CordFoundation implements FoundationNode {
   }
 
   async call<T>(target: RpcTarget, method: string, params: unknown, opts: RpcCallOptions = {}): Promise<T> {
-    const isNodeTarget = "nodeId" in target && typeof target.nodeId === "string";
-    const timeoutMs = opts.timeoutMs ?? 1000;
-    const originNodeId = opts.originNodeId ?? this.nodeId;
-
-    if (isNodeTarget) {
-      const local = this.registry.getNode(target.nodeId);
-      if (local?.started) {
-        if (!this.registry.canReach(this.nodeId, local.nodeId)) {
-          throw new Error(`Node ${this.nodeId} cannot reach ${local.nodeId}`);
-        }
-        const result = await raceTimeout(
-          local.dispatch(
-            method,
-            { auth: opts.auth, srcNodeId: this.nodeId, originNodeId, traceId: opts.traceId },
-            params,
-          ) as Promise<T>,
-          timeoutMs,
-          `${method} -> ${local.nodeId}`,
-        );
-        await this.observeOutbound(local.nodeId);
-        return result;
-      }
-
-      const remote = await this.lookupPublishedNode(target.nodeId);
-      const addr = remote?.addrs?.[0];
-      if (!remote?.started || !addr) {
-        throw new Error(`Target ${target.nodeId} is not available`);
-      }
-      const result = await raceTimeout(this.callHttp<T>(addr, method, params, { ...opts, originNodeId }), timeoutMs, `${method} -> ${target.nodeId}`);
-      await this.observeOutbound(target.nodeId);
-      return result;
-    }
-
-    const addr = target.addr;
-    const local = this.registry.getNodeByAddr(addr);
-    if (local?.started) {
-      if (!this.registry.canReach(this.nodeId, local.nodeId)) {
-        throw new Error(`Node ${this.nodeId} cannot reach ${local.nodeId}`);
-      }
-      const result = await raceTimeout(
-        local.dispatch(
-          method,
-          { auth: opts.auth, srcNodeId: this.nodeId, originNodeId, traceId: opts.traceId },
-          params,
-        ) as Promise<T>,
-        timeoutMs,
-        `${method} -> ${local.nodeId}`,
-      );
-      await this.observeOutbound(local.nodeId);
-      return result;
-    }
-    return raceTimeout(this.callHttp<T>(addr, method, params, { ...opts, originNodeId }), timeoutMs, `${method} -> ${addr}`);
+    return (await this.callDetailed<T>(target, method, params, opts)).result;
   }
 
   async ping(target: RpcTarget): Promise<{ ok: boolean; rttMs: number }> {
@@ -405,14 +520,16 @@ export class CordFoundation implements FoundationNode {
     return [...discovered.values()].sort((left, right) => left.nodeId.localeCompare(right.nodeId));
   }
 
+  async getPeerTable(_opts?: { verbose?: boolean }): Promise<PeerTable> {
+    return {
+      nodeId: this.nodeId,
+      entries: this.buildPeerEntries(await this.loadRouteState()),
+    };
+  }
+
   async getRouteTable(_opts?: { verbose?: boolean }): Promise<RouteTable> {
     const state = await this.loadRouteState();
     const knownNodeIds = new Set<string>();
-    for (const node of await this.discover()) {
-      if (node.nodeId !== this.nodeId) {
-        knownNodeIds.add(node.nodeId);
-      }
-    }
     for (const nodeId of Object.keys(state.routes)) {
       if (nodeId !== this.nodeId) {
         knownNodeIds.add(nodeId);
@@ -427,19 +544,31 @@ export class CordFoundation implements FoundationNode {
         knownNodeIds.add(nodeId);
       }
     }
-    for (const nodeId of Object.keys(state.observations)) {
-      if (nodeId !== this.nodeId && isRouteVisibleNodeId(nodeId)) {
-        knownNodeIds.add(nodeId);
-      }
+    for (const entry of this.buildPeerEntries(state)) {
+      knownNodeIds.add(entry.nodeId);
     }
     if (state.proxyMode.defaultDstNodeId && state.proxyMode.defaultDstNodeId !== this.nodeId) {
       knownNodeIds.add(state.proxyMode.defaultDstNodeId);
     }
 
-    const nowMs = Date.now();
     const entries: RouteEntry[] = [...knownNodeIds]
       .sort((left, right) => left.localeCompare(right))
-      .map((nodeId) => this.buildRouteEntry(nodeId, state, nowMs));
+      .map((nodeId) => {
+        const peer = this.buildPeerEntry(nodeId, state);
+        const explicitRoute = state.routes[nodeId];
+        const deny = state.deny[nodeId] ?? {};
+        const path = this.renderPathForNode(nodeId, state, explicitRoute?.proxyNodeId ?? state.peers[nodeId]?.viaNodeId, peer?.viaDetail);
+        return {
+          nodeId,
+          via: explicitRoute?.proxyNodeId ?? peer?.via ?? "-",
+          path,
+          ways: peer?.ways ?? "-",
+          state: explicitRoute?.proxyNodeId ? "configured" : peer?.state ?? "configured",
+          denyIn: deny.in === true,
+          denyOut: deny.out === true,
+          ttlRemainingMs: peer?.ttlRemainingMs ?? null,
+        };
+      });
 
     return {
       nodeId: this.nodeId,
@@ -447,6 +576,120 @@ export class CordFoundation implements FoundationNode {
       observationTtlMs: this.observationTtlMs,
       entries,
     };
+  }
+
+  async connect(target: RpcTarget, opts: { ttlMs?: number } = {}): Promise<{ ok: true; peer: NodeInfo; ttlMs: number | null }> {
+    const ttlMs = typeof opts.ttlMs === "number" && opts.ttlMs > 0 ? opts.ttlMs : 0;
+    const resolved = await this.resolveDirectAddr(target);
+    const opened = await this.callHttpDetailed<{ ok: true; sessionId: string }>(
+      resolved.addr,
+      "cord.foundation.reverse.open",
+      { ttlMs } satisfies ReverseOpenPayload,
+      {
+        timeoutMs: 5_000,
+        auth: this.makeInternalAuth(),
+        originNodeId: this.nodeId,
+      },
+    );
+
+    await this.mergePeer(opened.peer.nodeId, (peer) => {
+      this.applyNodeInfo(peer, opened.peer);
+      peer.directAddr = resolved.addr;
+      peer.connected = true;
+      peer.suggested = false;
+      peer.expiresAtMs = ttlMs > 0 ? Date.now() + ttlMs : null;
+      peer.lastInboundMs = Date.now();
+      peer.lastOutboundMs = Date.now();
+      peer.lastSeenMs = Date.now();
+    });
+
+    const existing = this.reverseOutgoing.get(opened.peer.nodeId);
+    if (existing) {
+      existing.stop = true;
+      this.reverseOutgoing.delete(opened.peer.nodeId);
+    }
+
+    const outgoing: ReverseOutgoingConnection = {
+      remoteNodeId: opened.peer.nodeId,
+      remoteAddr: resolved.addr,
+      sessionId: opened.result.sessionId,
+      expiresAtMs: ttlMs > 0 ? Date.now() + ttlMs : null,
+      stop: false,
+    };
+    this.reverseOutgoing.set(opened.peer.nodeId, outgoing);
+    void this.runReverseClient(outgoing);
+
+    return {
+      ok: true,
+      peer: opened.peer,
+      ttlMs: ttlMs > 0 ? ttlMs : null,
+    };
+  }
+
+  async disconnect(targetNodeId: string): Promise<{ ok: true; nodeId: string }> {
+    const outgoing = this.reverseOutgoing.get(targetNodeId);
+    if (outgoing) {
+      outgoing.stop = true;
+      this.reverseOutgoing.delete(targetNodeId);
+      try {
+        await this.callHttpDetailed(
+          outgoing.remoteAddr,
+          "cord.foundation.reverse.close",
+          { sessionId: outgoing.sessionId } satisfies ReverseClosePayload,
+          {
+            timeoutMs: 2_000,
+            auth: this.makeInternalAuth(),
+            originNodeId: this.nodeId,
+          },
+        );
+      } catch {
+        // Best-effort close.
+      }
+    }
+
+    const incoming = this.reverseIncoming.get(targetNodeId);
+    if (incoming) {
+      this.closeIncomingSession(incoming, "closed by peer");
+    }
+
+    await this.mergePeer(targetNodeId, (peer) => {
+      peer.connected = false;
+      if (peer.expiresAtMs === null) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
+    });
+
+    return { ok: true, nodeId: targetNodeId };
+  }
+
+  async learn(target: RpcTarget): Promise<{ ok: true; learned: string[]; skipped: string[] }> {
+    const remote = await this.callDetailed<PeerSummary[]>(target, "cord.foundation.peer.list", {}, { timeoutMs: 5_000, auth: this.makeInternalAuth() });
+    const learned: string[] = [];
+    const skipped: string[] = [];
+    for (const peer of remote.result) {
+      if (peer.nodeId === this.nodeId || peer.nodeId === remote.peer.nodeId) {
+        skipped.push(peer.nodeId);
+        continue;
+      }
+      const current = (await this.loadRouteState()).peers[peer.nodeId];
+      if (current?.connected || (current && !current.suggested && (current.directAddr || current.viaNodeId))) {
+        skipped.push(peer.nodeId);
+        continue;
+      }
+      await this.mergePeer(peer.nodeId, (localPeer) => {
+        localPeer.nodeEpoch = peer.nodeEpoch;
+        localPeer.addrs = peer.addrs;
+        localPeer.props = peer.props;
+        localPeer.viaNodeId = remote.peer.nodeId;
+        localPeer.viaDetail = peer.viaKind === "reverse" ? "reverse" : "direct";
+        localPeer.suggested = true;
+        localPeer.connected = false;
+        localPeer.expiresAtMs = Date.now() + this.observationTtlMs;
+        localPeer.lastSeenMs = Date.now();
+      });
+      learned.push(peer.nodeId);
+    }
+    return { ok: true, learned, skipped };
   }
 
   async setRoute(targetNodeId: string, proxyNodeId?: string): Promise<void> {
@@ -507,54 +750,6 @@ export class CordFoundation implements FoundationNode {
     return this.started;
   }
 
-  private buildRouteEntry(nodeId: string, state: RouteStateRecord, nowMs: number): RouteEntry {
-    const route = state.routes[nodeId];
-    const deny = state.deny[nodeId] ?? {};
-    const observation = state.observations[nodeId] ?? {};
-    const ttlRemainingInMs = ttlRemaining(observation.lastInboundMs, this.observationTtlMs, nowMs);
-    const ttlRemainingOutMs = ttlRemaining(observation.lastOutboundMs, this.observationTtlMs, nowMs);
-    const observedIn = ttlRemainingInMs !== null;
-    const observedOut = ttlRemainingOutMs !== null;
-    const denyIn = deny.in === true;
-    const denyOut = deny.out === true;
-
-    let summary = nodeId;
-    let mode: RouteEntry["mode"] = denyOut ? "none" : "direct";
-
-    if (route?.proxyNodeId) {
-      summary = `${nodeId}[${route.proxyNodeId}]`;
-      mode = "proxy";
-    } else if (denyIn && denyOut) {
-      summary = `${nodeId}{none}`;
-      mode = "none";
-    } else if (denyOut && !denyIn) {
-      summary = `${nodeId}{in}`;
-      mode = "none";
-    } else if (denyIn && !denyOut) {
-      summary = `${nodeId}{out}`;
-      mode = "direct";
-    } else if (observedIn && !observedOut) {
-      summary = `${nodeId}{in}`;
-    } else if (observedOut && !observedIn) {
-      summary = `${nodeId}{out}`;
-    }
-
-    return {
-      nodeId,
-      summary,
-      mode,
-      proxyNodeId: route?.proxyNodeId,
-      denyIn,
-      denyOut,
-      observedIn,
-      observedOut,
-      lastInboundMs: observedIn ? observation.lastInboundMs ?? null : null,
-      lastOutboundMs: observedOut ? observation.lastOutboundMs ?? null : null,
-      ttlRemainingInMs,
-      ttlRemainingOutMs,
-    };
-  }
-
   private async startHttpServer(): Promise<void> {
     if (this.httpServer) {
       return;
@@ -581,6 +776,7 @@ export class CordFoundation implements FoundationNode {
             auth?: RpcAuth;
             traceId?: string;
             srcNodeId?: string;
+            srcNodeInfo?: NodeInfo;
             originNodeId?: string;
           };
           if (typeof payload.method !== "string" || payload.method.length === 0) {
@@ -595,17 +791,18 @@ export class CordFoundation implements FoundationNode {
             {
               auth: payload.auth,
               srcNodeId: payload.srcNodeId,
+              srcNodeInfo: payload.srcNodeInfo,
               originNodeId: payload.originNodeId,
               traceId: payload.traceId,
             },
             payload.params,
           );
-          writeJson(res, 200, { ok: true, result });
+          writeJson(res, 200, { ok: true, node: this.self(), result });
           return;
         }
         writeJson(res, 404, { ok: false, error: { message: `Unknown route ${req.method ?? "GET"} ${req.url ?? "/"}` } });
       } catch (error) {
-        writeJson(res, 500, { ok: false, error: { message: error instanceof Error ? error.message : String(error) } });
+        writeJson(res, 500, { ok: false, node: this.self(), error: { message: error instanceof Error ? error.message : String(error) } });
       }
     });
     await new Promise<void>((resolve, reject) => {
@@ -636,7 +833,26 @@ export class CordFoundation implements FoundationNode {
   }
 
   private async loadRouteState(): Promise<RouteStateRecord> {
-    return parseRouteStateRecord(await this.registry.sharedStore.get(routeStateKey(this.nodeId)));
+    const state = parseRouteStateRecord(await this.registry.sharedStore.get(routeStateKey(this.nodeId)));
+    const now = Date.now();
+    let changed = false;
+    for (const peer of Object.values(state.peers)) {
+      if (peer.connected && !this.isLiveConnectedPeer(peer.nodeId)) {
+        peer.connected = false;
+        if (peer.expiresAtMs === null) {
+          peer.expiresAtMs = now + this.observationTtlMs;
+        }
+        changed = true;
+      }
+      if (peer.expiresAtMs && peer.expiresAtMs <= now && !peer.connected && !state.routes[peer.nodeId] && !state.deny[peer.nodeId]) {
+        delete state.peers[peer.nodeId];
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.saveRouteState(state);
+    }
+    return state;
   }
 
   private async saveRouteState(state: RouteStateRecord): Promise<void> {
@@ -650,29 +866,269 @@ export class CordFoundation implements FoundationNode {
     return state;
   }
 
-  private async observeInbound(srcNodeId: string | undefined): Promise<void> {
+  private isLiveConnectedPeer(nodeId: string): boolean {
+    return this.reverseIncoming.has(nodeId) || this.reverseOutgoing.has(nodeId);
+  }
+
+  private applyNodeInfo(peer: PeerStateRecord, info: NodeInfo): void {
+    peer.nodeId = info.nodeId;
+    peer.nodeEpoch = info.nodeEpoch;
+    peer.addrs = info.addrs;
+    peer.props = info.props;
+  }
+
+  private async mergePeer(nodeId: string, mutator: (peer: PeerStateRecord) => void): Promise<void> {
+    await this.updateRouteState((state) => {
+      const peer = state.peers[nodeId] ?? {
+        nodeId,
+        suggested: false,
+        connected: false,
+      };
+      mutator(peer);
+      state.peers[nodeId] = peer;
+    });
+  }
+
+  private async learnInbound(srcNodeId: string | undefined, srcNodeInfo: NodeInfo | undefined): Promise<void> {
     if (!srcNodeId || srcNodeId === this.nodeId || !isRouteVisibleNodeId(srcNodeId)) {
       return;
     }
-    await this.updateRouteState((state) => {
-      const current = state.observations[srcNodeId] ?? {};
-      current.lastInboundMs = Date.now();
-      state.observations[srcNodeId] = current;
+    await this.mergePeer(srcNodeId, (peer) => {
+      if (srcNodeInfo) {
+        this.applyNodeInfo(peer, srcNodeInfo);
+        if (!peer.directAddr && srcNodeInfo.addrs?.[0] && isAddr(srcNodeInfo.addrs[0])) {
+          peer.directAddr = srcNodeInfo.addrs[0];
+        }
+      }
+      peer.lastInboundMs = Date.now();
+      peer.lastSeenMs = Date.now();
+      peer.suggested = false;
+      if (!peer.connected) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
     });
   }
 
-  private async observeOutbound(dstNodeId: string | undefined): Promise<void> {
-    if (!dstNodeId || dstNodeId === this.nodeId || !isRouteVisibleNodeId(dstNodeId)) {
+  private async learnOutbound(info: NodeInfo, opts: { addr?: string; viaNodeId?: string; viaDetail?: "direct" | "reverse"; connected?: boolean }): Promise<void> {
+    if (!info.nodeId || info.nodeId === this.nodeId || !isRouteVisibleNodeId(info.nodeId)) {
       return;
     }
-    await this.updateRouteState((state) => {
-      const current = state.observations[dstNodeId] ?? {};
-      current.lastOutboundMs = Date.now();
-      state.observations[dstNodeId] = current;
+    await this.mergePeer(info.nodeId, (peer) => {
+      this.applyNodeInfo(peer, info);
+      if (opts.addr) {
+        peer.directAddr = opts.addr;
+      }
+      if (opts.viaNodeId) {
+        peer.viaNodeId = opts.viaNodeId;
+        peer.viaDetail = opts.viaDetail ?? "direct";
+      }
+      if (typeof opts.connected === "boolean") {
+        peer.connected = opts.connected;
+      }
+      peer.lastOutboundMs = Date.now();
+      peer.lastSeenMs = Date.now();
+      peer.suggested = false;
+      if (!peer.connected) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
     });
   }
 
-  private async callHttp<T>(addr: string, method: string, params: unknown, opts: RpcCallOptions): Promise<T> {
+  private async learnProxyOrigin(originNodeId: string | undefined, viaNodeId: string | undefined): Promise<void> {
+    if (!originNodeId || !viaNodeId || originNodeId === this.nodeId || originNodeId === viaNodeId || !isRouteVisibleNodeId(originNodeId)) {
+      return;
+    }
+    await this.mergePeer(originNodeId, (peer) => {
+      peer.nodeId = originNodeId;
+      peer.viaNodeId = viaNodeId;
+      peer.viaDetail = "direct";
+      peer.lastInboundMs = Date.now();
+      peer.lastSeenMs = Date.now();
+      peer.suggested = false;
+      if (!peer.connected) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
+    });
+  }
+
+  private buildPeerEntries(state: RouteStateRecord): PeerEntry[] {
+    const now = Date.now();
+    const entries: PeerEntry[] = [];
+    for (const [nodeId, peer] of Object.entries(state.peers)) {
+      const connected = Boolean(peer.connected && this.isLiveConnectedPeer(nodeId));
+      const outbound = connected || (typeof peer.lastOutboundMs === "number" && peer.lastOutboundMs + this.observationTtlMs > now);
+      const inbound = connected || (typeof peer.lastInboundMs === "number" && peer.lastInboundMs + this.observationTtlMs > now);
+      const suggested = peer.suggested === true && !connected && !outbound && !inbound;
+      const stateLabel: PeerEntry["state"] = connected ? "connected" : suggested ? "suggested" : "learned";
+      if (!connected && !outbound && !inbound && !suggested) {
+        continue;
+      }
+      entries.push({
+        nodeId,
+        via: this.viaLabelForPeer(nodeId, peer),
+        ways: outbound && inbound ? "both" : outbound ? "out" : inbound ? "in" : "-",
+        ttlRemainingMs: connected ? null : peer.expiresAtMs ? Math.max(0, peer.expiresAtMs - now) : null,
+        state: stateLabel,
+        nodeEpoch: peer.nodeEpoch,
+        addrs: peer.addrs,
+        props: peer.props,
+      });
+    }
+    return entries.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+  }
+
+  private buildPeerEntry(nodeId: string, state: RouteStateRecord): (PeerEntry & { viaValue?: string; viaDetail?: "direct" | "reverse" }) | null {
+    const peer = state.peers[nodeId];
+    if (!peer) {
+      return null;
+    }
+    const entry = this.buildPeerEntries(state).find((item) => item.nodeId === nodeId);
+    if (!entry) {
+      return null;
+    }
+    return {
+      ...entry,
+      viaValue: peer.viaNodeId ?? peer.directAddr ?? peer.addrs?.[0],
+      viaDetail: peer.viaDetail,
+    };
+  }
+
+  private viaLabelForPeer(nodeId: string, peer: PeerStateRecord): string {
+    if (peer.connected && this.reverseIncoming.has(nodeId)) {
+      return "reverse";
+    }
+    if (peer.viaNodeId) {
+      return `via ${peer.viaNodeId}`;
+    }
+    if (peer.directAddr) {
+      return peer.directAddr;
+    }
+    if (peer.addrs?.[0]) {
+      return peer.addrs[0];
+    }
+    if (peer.connected && this.reverseOutgoing.has(nodeId)) {
+      return this.reverseOutgoing.get(nodeId)!.remoteAddr;
+    }
+    return "-";
+  }
+
+  private renderPathForNode(nodeId: string, state: RouteStateRecord, explicitProxyNodeId?: string, viaDetail?: "direct" | "reverse"): string {
+    if (this.reverseIncoming.has(nodeId)) {
+      return `${this.nodeId} -< ${nodeId}`;
+    }
+    const proxyNodeId = explicitProxyNodeId || state.peers[nodeId]?.viaNodeId;
+    if (proxyNodeId) {
+      return `${this.nodeId} -> ${proxyNodeId}${viaDetail === "reverse" ? ` -< ${nodeId}` : ` -> ${nodeId}`}`;
+    }
+    return `${this.nodeId} -> ${nodeId}`;
+  }
+
+  private async resolveDirectAddr(target: RpcTarget): Promise<{ addr: string; nodeId?: string }> {
+    if ("addr" in target && typeof target.addr === "string") {
+      return { addr: target.addr };
+    }
+    const state = await this.loadRouteState();
+    const peer = state.peers[target.nodeId];
+    if (peer?.directAddr) {
+      return { addr: peer.directAddr, nodeId: target.nodeId };
+    }
+    if (peer?.addrs?.[0]) {
+      return { addr: peer.addrs[0], nodeId: target.nodeId };
+    }
+    const local = this.registry.getNode(target.nodeId);
+    if (local?.started) {
+      const addr = local.info().addrs?.[0];
+      if (addr) {
+        return { addr, nodeId: target.nodeId };
+      }
+    }
+    const published = await this.lookupPublishedNode(target.nodeId);
+    if (published?.started && published.addrs?.[0]) {
+      return { addr: published.addrs[0], nodeId: target.nodeId };
+    }
+    throw new Error(`Target ${target.nodeId} is not available`);
+  }
+
+  private async callDetailed<T>(target: RpcTarget, method: string, params: unknown, opts: RpcCallOptions = {}): Promise<CallResult<T>> {
+    const timeoutMs = opts.timeoutMs ?? 1000;
+    const originNodeId = opts.originNodeId ?? this.nodeId;
+    const ctxBase = {
+      auth: opts.auth,
+      srcNodeId: this.nodeId,
+      srcNodeInfo: this.self(),
+      originNodeId,
+      traceId: opts.traceId,
+    } satisfies RpcCtx;
+
+    if ("nodeId" in target && typeof target.nodeId === "string") {
+      const local = this.registry.getNode(target.nodeId);
+      if (local?.started) {
+        if (!this.registry.canReach(this.nodeId, local.nodeId)) {
+          throw new Error(`Node ${this.nodeId} cannot reach ${local.nodeId}`);
+        }
+        const result = await raceTimeout(local.dispatch(method, ctxBase, params) as Promise<T>, timeoutMs, `${method} -> ${local.nodeId}`);
+        await this.learnOutbound(local.info(), { addr: local.info().addrs?.[0] });
+        return {
+          result,
+          peer: local.info(),
+          via: "local",
+          addr: local.info().addrs?.[0],
+        };
+      }
+
+      const reverseSession = this.getActiveIncomingSession(target.nodeId);
+      if (reverseSession) {
+        const result = await this.callReverse<T>(reverseSession, method, params, {
+          timeoutMs,
+          traceId: opts.traceId,
+          auth: opts.auth,
+          originNodeId,
+        });
+        await this.learnOutbound(reverseSession.peer, { viaNodeId: undefined, viaDetail: "reverse", connected: true });
+        return {
+          result,
+          peer: reverseSession.peer,
+          via: "reverse",
+        };
+      }
+
+      const resolved = await this.resolveDirectAddr(target);
+      const remote = await raceTimeout(this.callHttpDetailed<T>(resolved.addr, method, params, { ...opts, originNodeId }), timeoutMs, `${method} -> ${target.nodeId}`);
+      await this.learnOutbound(remote.peer, { addr: resolved.addr });
+      return {
+        result: remote.result,
+        peer: remote.peer,
+        via: "direct",
+        addr: resolved.addr,
+      };
+    }
+
+    const local = this.registry.getNodeByAddr(target.addr);
+    if (local?.started) {
+      if (!this.registry.canReach(this.nodeId, local.nodeId)) {
+        throw new Error(`Node ${this.nodeId} cannot reach ${local.nodeId}`);
+      }
+      const result = await raceTimeout(local.dispatch(method, ctxBase, params) as Promise<T>, timeoutMs, `${method} -> ${local.nodeId}`);
+      await this.learnOutbound(local.info(), { addr: target.addr });
+      return {
+        result,
+        peer: local.info(),
+        via: "local",
+        addr: target.addr,
+      };
+    }
+
+    const remote = await raceTimeout(this.callHttpDetailed<T>(target.addr, method, params, { ...opts, originNodeId }), timeoutMs, `${method} -> ${target.addr}`);
+    await this.learnOutbound(remote.peer, { addr: target.addr });
+    return {
+      result: remote.result,
+      peer: remote.peer,
+      via: "direct",
+      addr: target.addr,
+    };
+  }
+
+  private async callHttpDetailed<T>(addr: string, method: string, params: unknown, opts: RpcCallOptions): Promise<{ result: T; peer: NodeInfo }> {
     const response = await fetch(`http://${addr}/rpc`, {
       method: "POST",
       headers: {
@@ -684,22 +1140,26 @@ export class CordFoundation implements FoundationNode {
         auth: opts.auth,
         traceId: opts.traceId,
         srcNodeId: this.nodeId,
+        srcNodeInfo: this.self(),
         originNodeId: opts.originNodeId ?? this.nodeId,
       }),
     });
-    const payload = (await response.json()) as {
-      ok?: boolean;
-      result?: T;
-      error?: { message?: string };
-    };
+    const payload = (await response.json()) as RpcHttpResponse<T>;
     if (!response.ok || payload.ok === false) {
       throw new Error(payload.error?.message ?? `${method} failed against ${addr}`);
     }
-    return payload.result as T;
+    if (!payload.node?.nodeId) {
+      throw new Error(`${method} failed against ${addr}: missing remote node metadata`);
+    }
+    return {
+      result: payload.result as T,
+      peer: payload.node,
+    };
   }
 
   private async dispatch(method: string, ctx: RpcCtx, params: unknown): Promise<unknown> {
-    await this.observeInbound(ctx.srcNodeId);
+    await this.learnInbound(ctx.srcNodeId, ctx.srcNodeInfo);
+    await this.learnProxyOrigin(ctx.originNodeId, ctx.srcNodeId);
     await this.enforceInboundRoutePolicy(ctx.srcNodeId);
     return this.invokeHandler(method, ctx, params);
   }
@@ -733,11 +1193,11 @@ export class CordFoundation implements FoundationNode {
     }
 
     const state = await this.loadRouteState();
-    const effectiveDstNodeId = request.dstNodeId ?? (state.proxyMode.enabled ? state.proxyMode.defaultDstNodeId : undefined);
+    const effectiveDst = request.dst ?? (state.proxyMode.enabled && state.proxyMode.defaultDstNodeId ? { kind: "node", value: state.proxyMode.defaultDstNodeId } : undefined);
     const timeoutMs = request.timeoutMs ?? 5000;
     const originNodeId = ctx.originNodeId ?? ctx.srcNodeId ?? this.nodeId;
 
-    if (!effectiveDstNodeId || effectiveDstNodeId === this.nodeId) {
+    if (!effectiveDst || (effectiveDst.kind === "node" && effectiveDst.value === this.nodeId) || (effectiveDst.kind === "addr" && this.addrs.includes(effectiveDst.value))) {
       return {
         result: await this.invokeHandler(request.method, ctx, request.params),
         route: {
@@ -745,34 +1205,61 @@ export class CordFoundation implements FoundationNode {
           executedNodeId: this.nodeId,
           mode: "local",
           nextHopNodeId: this.nodeId,
-          path: request.path && request.path.length > 0 ? [...request.path] : [this.nodeId],
+          path: [this.nodeId],
+          hops: request.path ?? [],
         },
       };
     }
 
-    const nextPath = [...(request.path && request.path.length > 0 ? request.path : [this.nodeId])];
-    const route = state.routes[effectiveDstNodeId];
-    const denyOutToDst = state.deny[effectiveDstNodeId]?.out === true;
-    const hopCount = request.hopCount ?? 0;
+    if (effectiveDst.kind === "addr") {
+      const outbound = await this.callDetailed(
+        { addr: effectiveDst.value },
+        request.method,
+        request.params,
+        {
+          timeoutMs,
+          traceId: request.traceId ?? ctx.traceId,
+          auth: ctx.auth,
+          originNodeId,
+        },
+      );
+      return {
+        result: outbound.result,
+        route: {
+          contactedNodeId: this.nodeId,
+          executedNodeId: outbound.peer.nodeId,
+          mode: "direct",
+          nextHopNodeId: outbound.peer.nodeId,
+          path: hopPath([...(request.path ?? []), { from: this.nodeId, to: outbound.peer.nodeId, kind: outbound.via === "reverse" ? "reverse" : "direct" }]),
+          hops: [...(request.path ?? []), { from: this.nodeId, to: outbound.peer.nodeId, kind: outbound.via === "reverse" ? "reverse" : "direct" }],
+        },
+      };
+    }
 
-    if (hopCount > 0 && route?.proxyNodeId) {
+    const dstNodeId = effectiveDst.value;
+    const route = state.routes[dstNodeId];
+    const learnedPeer = state.peers[dstNodeId];
+    const proxyNodeId = route?.proxyNodeId ?? (learnedPeer && !learnedPeer.suggested ? learnedPeer.viaNodeId : undefined);
+    const hopCount = request.hopCount ?? 0;
+    const denyOutToDst = state.deny[dstNodeId]?.out === true;
+
+    if (hopCount > 0 && proxyNodeId) {
       throw new Error("invalid route: proxy hop exceeds 1");
     }
 
-    if (hopCount === 0 && route?.proxyNodeId) {
-      const proxyNodeId = route.proxyNodeId;
+    if (hopCount === 0 && proxyNodeId) {
       if (state.deny[proxyNodeId]?.out) {
         throw new Error(`cannot reach proxy ${proxyNodeId} (route denied or unreachable)`);
       }
       try {
-        const forwarded = await this.call<FoundationExecResponse>(
+        const forwarded = await this.callDetailed<FoundationExecResponse>(
           { nodeId: proxyNodeId },
           "cord.foundation.exec",
           {
             ...request,
-            dstNodeId: effectiveDstNodeId,
+            dst: { kind: "node", value: dstNodeId },
             hopCount: 1,
-            path: [...nextPath, proxyNodeId],
+            path: [...(request.path ?? []), { from: this.nodeId, to: proxyNodeId, kind: "direct" }],
           } satisfies FoundationExecRequest,
           {
             timeoutMs,
@@ -781,16 +1268,29 @@ export class CordFoundation implements FoundationNode {
             originNodeId,
           },
         );
+
+        const tailHop = forwarded.result.route.hops[forwarded.result.route.hops.length - 1];
+        await this.mergePeer(dstNodeId, (peer) => {
+          peer.nodeId = dstNodeId;
+          peer.viaNodeId = proxyNodeId;
+          peer.viaDetail = tailHop?.kind === "reverse" ? "reverse" : "direct";
+          peer.lastOutboundMs = Date.now();
+          peer.lastSeenMs = Date.now();
+          peer.suggested = false;
+          if (!peer.connected) {
+            peer.expiresAtMs = Date.now() + this.observationTtlMs;
+          }
+        });
+
         return {
-          result: forwarded.result,
+          result: forwarded.result.result,
           route: {
-            ...forwarded.route,
             contactedNodeId: this.nodeId,
-            executedNodeId: effectiveDstNodeId,
+            executedNodeId: forwarded.result.route.executedNodeId,
             mode: "proxy",
-            proxyNodeId,
             nextHopNodeId: proxyNodeId,
-            path: forwarded.route.path,
+            path: forwarded.result.route.path,
+            hops: forwarded.result.route.hops,
           },
         };
       } catch (error) {
@@ -802,16 +1302,17 @@ export class CordFoundation implements FoundationNode {
       }
     }
 
-    if (denyOutToDst) {
+    const reverseAvailable = this.getActiveIncomingSession(dstNodeId) !== null;
+    if (denyOutToDst && !reverseAvailable) {
       if (hopCount > 0) {
-        throw new Error(`cannot reach destination ${effectiveDstNodeId} from proxy ${this.nodeId} (route denied or unreachable)`);
+        throw new Error(`cannot reach destination ${dstNodeId} from proxy ${this.nodeId} (route denied or unreachable)`);
       }
-      throw new Error(`no route to ${effectiveDstNodeId} (direct denied, no proxy route)`);
+      throw new Error(`no route to ${dstNodeId} (direct denied, no proxy route)`);
     }
 
     try {
-      const result = await this.call(
-        { nodeId: effectiveDstNodeId },
+      const outbound = await this.callDetailed(
+        { nodeId: dstNodeId },
         request.method,
         request.params,
         {
@@ -822,19 +1323,20 @@ export class CordFoundation implements FoundationNode {
         },
       );
       return {
-        result,
+        result: outbound.result,
         route: {
           contactedNodeId: this.nodeId,
-          executedNodeId: effectiveDstNodeId,
+          executedNodeId: outbound.peer.nodeId,
           mode: hopCount > 0 ? "proxy" : "direct",
-          nextHopNodeId: effectiveDstNodeId,
-          path: [...nextPath, effectiveDstNodeId],
+          nextHopNodeId: outbound.peer.nodeId,
+          path: hopPath([...(request.path ?? []), { from: this.nodeId, to: outbound.peer.nodeId, kind: outbound.via === "reverse" ? "reverse" : "direct" }]),
+          hops: [...(request.path ?? []), { from: this.nodeId, to: outbound.peer.nodeId, kind: outbound.via === "reverse" ? "reverse" : "direct" }],
         },
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (hopCount > 0 && (message.includes("Target ") || message.includes("cannot reach") || message.includes("route denied"))) {
-        throw new Error(`cannot reach destination ${effectiveDstNodeId} from proxy ${this.nodeId} (route denied or unreachable)`);
+        throw new Error(`cannot reach destination ${dstNodeId} from proxy ${this.nodeId} (route denied or unreachable)`);
       }
       throw error;
     }
@@ -874,10 +1376,314 @@ export class CordFoundation implements FoundationNode {
     current.count += 1;
   }
 
+  private getActiveIncomingSession(nodeId: string): ReverseIncomingSession | null {
+    const session = this.reverseIncoming.get(nodeId);
+    if (!session) {
+      return null;
+    }
+    if (session.expiresAtMs && session.expiresAtMs <= Date.now()) {
+      this.closeIncomingSession(session, "reverse session expired");
+      return null;
+    }
+    if (Date.now() - session.lastSeenMs > 45_000) {
+      this.closeIncomingSession(session, "reverse session stale");
+      return null;
+    }
+    return session;
+  }
+
+  private closeIncomingSession(session: ReverseIncomingSession, reason: string): void {
+    this.reverseIncoming.delete(session.peer.nodeId);
+    for (const waiter of session.waiters) {
+      waiter({ kind: "noop" });
+    }
+    session.waiters.length = 0;
+    for (const pending of session.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    session.pending.clear();
+    void this.mergePeer(session.peer.nodeId, (peer) => {
+      peer.connected = false;
+      if (peer.expiresAtMs === null) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
+    });
+  }
+
+  private async callReverse<T>(session: ReverseIncomingSession, method: string, params: unknown, opts: RpcCallOptions): Promise<T> {
+    const requestId = randomId("revreq");
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        session.pending.delete(requestId);
+        reject(new Error(`${method} -> ${session.peer.nodeId} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      session.pending.set(requestId, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        timer,
+      });
+      const request: ReverseRequest = {
+        requestId,
+        method,
+        params,
+        auth: opts.auth,
+        traceId: opts.traceId,
+        srcNodeId: this.nodeId,
+        srcNodeInfo: this.self(),
+        originNodeId: opts.originNodeId ?? this.nodeId,
+      };
+      const waiter = session.waiters.shift();
+      if (waiter) {
+        waiter({ kind: "request", request });
+      } else {
+        session.queue.push(request);
+      }
+    });
+  }
+
+  private async runReverseClient(connection: ReverseOutgoingConnection): Promise<void> {
+    while (this.started && !connection.stop) {
+      if (connection.expiresAtMs && connection.expiresAtMs <= Date.now()) {
+        break;
+      }
+      try {
+        const polled = await this.callHttpDetailed<ReversePollResponse>(
+          connection.remoteAddr,
+          "cord.foundation.reverse.poll",
+          {
+            sessionId: connection.sessionId,
+            waitMs: 15_000,
+          } satisfies ReversePollPayload,
+          {
+            timeoutMs: 20_000,
+            auth: this.makeInternalAuth(),
+            originNodeId: this.nodeId,
+          },
+        );
+        await this.learnOutbound(polled.peer, { addr: connection.remoteAddr, connected: true });
+        if (polled.result.kind === "request") {
+          await this.handleReverseRequest(connection, polled.result.request);
+        }
+      } catch (error) {
+        if (connection.stop) {
+          break;
+        }
+        await delay(500);
+        if (connection.expiresAtMs && connection.expiresAtMs <= Date.now()) {
+          break;
+        }
+        if (!this.started) {
+          break;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Unknown RPC method") || message.includes("invalid reverse session")) {
+          break;
+        }
+      }
+    }
+    this.reverseOutgoing.delete(connection.remoteNodeId);
+    await this.mergePeer(connection.remoteNodeId, (peer) => {
+      peer.connected = false;
+      if (peer.expiresAtMs === null) {
+        peer.expiresAtMs = Date.now() + this.observationTtlMs;
+      }
+    });
+  }
+
+  private async handleReverseRequest(connection: ReverseOutgoingConnection, request: ReverseRequest): Promise<void> {
+    let ok = true;
+    let result: unknown;
+    let errorText: string | undefined;
+    try {
+      result = await this.dispatch(
+        request.method,
+        {
+          auth: request.auth,
+          srcNodeId: request.srcNodeId,
+          srcNodeInfo: request.srcNodeInfo,
+          originNodeId: request.originNodeId,
+          traceId: request.traceId,
+        },
+        request.params,
+      );
+    } catch (error) {
+      ok = false;
+      errorText = error instanceof Error ? error.message : String(error);
+    }
+
+    await this.callHttpDetailed(
+      connection.remoteAddr,
+      "cord.foundation.reverse.reply",
+      {
+        sessionId: connection.sessionId,
+        requestId: request.requestId,
+        ok,
+        result,
+        error: errorText,
+      } satisfies ReverseReplyPayload,
+      {
+        timeoutMs: 5_000,
+        auth: this.makeInternalAuth(),
+        originNodeId: this.nodeId,
+      },
+    );
+  }
+
+  private async handleReverseOpen(ctx: RpcCtx, payload: ReverseOpenPayload): Promise<{ ok: true; sessionId: string }> {
+    const peer = ctx.srcNodeInfo ?? (ctx.srcNodeId ? { nodeId: ctx.srcNodeId, nodeEpoch: "unknown" } : null);
+    if (!peer?.nodeId) {
+      throw new Error("reverse.open requires srcNodeInfo");
+    }
+    const existing = this.reverseIncoming.get(peer.nodeId);
+    if (existing) {
+      this.closeIncomingSession(existing, "replaced by new reverse session");
+    }
+    const session: ReverseIncomingSession = {
+      sessionId: randomId("reverse"),
+      peer,
+      expiresAtMs: typeof payload.ttlMs === "number" && payload.ttlMs > 0 ? Date.now() + payload.ttlMs : null,
+      lastSeenMs: Date.now(),
+      queue: [],
+      waiters: [],
+      pending: new Map(),
+    };
+    this.reverseIncoming.set(peer.nodeId, session);
+    await this.mergePeer(peer.nodeId, (record) => {
+      this.applyNodeInfo(record, peer);
+      record.connected = true;
+      record.suggested = false;
+      record.expiresAtMs = session.expiresAtMs;
+      record.lastInboundMs = Date.now();
+      record.lastOutboundMs = Date.now();
+      record.lastSeenMs = Date.now();
+    });
+    return {
+      ok: true,
+      sessionId: session.sessionId,
+    };
+  }
+
+  private async handleReversePoll(ctx: RpcCtx, payload: ReversePollPayload): Promise<ReversePollResponse> {
+    const peerNodeId = ctx.srcNodeId;
+    if (!peerNodeId) {
+      throw new Error("reverse.poll requires srcNodeId");
+    }
+    const session = this.reverseIncoming.get(peerNodeId);
+    if (!session || session.sessionId !== payload.sessionId) {
+      throw new Error("invalid reverse session");
+    }
+    session.lastSeenMs = Date.now();
+    if (session.expiresAtMs && session.expiresAtMs <= Date.now()) {
+      this.closeIncomingSession(session, "reverse session expired");
+      throw new Error("invalid reverse session");
+    }
+    if (session.queue.length > 0) {
+      return { kind: "request", request: session.queue.shift()! };
+    }
+    return new Promise<ReversePollResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        const index = session.waiters.indexOf(handler);
+        if (index >= 0) {
+          session.waiters.splice(index, 1);
+        }
+        resolve({ kind: "noop" });
+      }, Math.max(500, Number(payload.waitMs ?? 15_000)));
+      const handler = (response: ReversePollResponse) => {
+        clearTimeout(timer);
+        resolve(response);
+      };
+      session.waiters.push(handler);
+    });
+  }
+
+  private async handleReverseReply(ctx: RpcCtx, payload: ReverseReplyPayload): Promise<{ ok: true }> {
+    const peerNodeId = ctx.srcNodeId;
+    if (!peerNodeId) {
+      throw new Error("reverse.reply requires srcNodeId");
+    }
+    const session = this.reverseIncoming.get(peerNodeId);
+    if (!session || session.sessionId !== payload.sessionId) {
+      throw new Error("invalid reverse session");
+    }
+    const pending = session.pending.get(payload.requestId);
+    if (!pending) {
+      throw new Error(`unknown reverse request ${payload.requestId}`);
+    }
+    session.pending.delete(payload.requestId);
+    clearTimeout(pending.timer);
+    if (payload.ok) {
+      pending.resolve(payload.result);
+    } else {
+      pending.reject(new Error(payload.error ?? `reverse request ${payload.requestId} failed`));
+    }
+    session.lastSeenMs = Date.now();
+    return { ok: true };
+  }
+
+  private async handleReverseClose(ctx: RpcCtx, payload: ReverseClosePayload): Promise<{ ok: true }> {
+    const peerNodeId = ctx.srcNodeId;
+    if (!peerNodeId) {
+      throw new Error("reverse.close requires srcNodeId");
+    }
+    const session = this.reverseIncoming.get(peerNodeId);
+    if (session && session.sessionId === payload.sessionId) {
+      this.closeIncomingSession(session, "closed by remote");
+    }
+    return { ok: true };
+  }
+
+  private async listPeerSummaries(): Promise<PeerSummary[]> {
+    const state = await this.loadRouteState();
+    return this.buildPeerEntries(state).map((entry) => {
+      const peer = state.peers[entry.nodeId];
+      return {
+        nodeId: entry.nodeId,
+        nodeEpoch: peer?.nodeEpoch,
+        addrs: peer?.addrs,
+        props: peer?.props,
+        viaKind: this.reverseIncoming.has(entry.nodeId)
+          ? "reverse"
+          : peer?.viaNodeId
+            ? "proxy"
+            : peer?.directAddr || peer?.addrs?.[0]
+              ? "direct"
+              : "unknown",
+        viaValue: peer?.viaNodeId ?? peer?.directAddr ?? peer?.addrs?.[0],
+        viaDetail: peer?.viaDetail,
+        ways: entry.ways,
+        ttlRemainingMs: entry.ttlRemainingMs,
+        state: entry.state,
+      } satisfies PeerSummary;
+    });
+  }
+
   private registerFoundationBuiltins(): void {
     this.registerHandler("cord.foundation.ping", async () => ({ ok: true }));
     this.registerHandler("cord.foundation.whoami", async () => this.self());
     this.registerHandler("cord.foundation.exec", async (ctx, params) => this.executeRouted(ctx, params as FoundationExecRequest));
+    this.registerHandler("cord.foundation.peer.list", async () => this.listPeerSummaries());
+    this.registerHandler("cord.foundation.peers", async () => this.getPeerTable());
+    this.registerHandler("cord.foundation.routes", async () => this.getRouteTable());
+    this.registerHandler("cord.foundation.connect", async (_ctx, params) => {
+      const payload = params as { target?: ExecTarget; ttlMs?: number };
+      if (!payload.target) {
+        throw new Error("connect requires a target");
+      }
+      return this.connect(payload.target.kind === "addr" ? { addr: payload.target.value } : { nodeId: payload.target.value }, { ttlMs: payload.ttlMs });
+    });
+    this.registerHandler("cord.foundation.disconnect", async (_ctx, params) => {
+      const payload = params as { targetNodeId?: string };
+      return this.disconnect(String(payload.targetNodeId ?? ""));
+    });
+    this.registerHandler("cord.foundation.learn", async (_ctx, params) => {
+      const payload = params as { target?: ExecTarget };
+      if (!payload.target) {
+        throw new Error("learn requires a target");
+      }
+      return this.learn(payload.target.kind === "addr" ? { addr: payload.target.value } : { nodeId: payload.target.value });
+    });
     this.registerHandler("cord.foundation.route", async (_ctx, params) => {
       const payload = params as { op?: string; targetNodeId?: string; proxyNodeId?: string; direction?: RouteDirection };
       switch (payload.op) {
@@ -902,5 +1708,9 @@ export class CordFoundation implements FoundationNode {
       const table = await this.getRouteTable();
       return { ok: true, proxyMode: table.proxyMode };
     });
+    this.registerHandler("cord.foundation.reverse.open", async (ctx, params) => this.handleReverseOpen(ctx, params as ReverseOpenPayload));
+    this.registerHandler("cord.foundation.reverse.poll", async (ctx, params) => this.handleReversePoll(ctx, params as ReversePollPayload));
+    this.registerHandler("cord.foundation.reverse.reply", async (ctx, params) => this.handleReverseReply(ctx, params as ReverseReplyPayload));
+    this.registerHandler("cord.foundation.reverse.close", async (ctx, params) => this.handleReverseClose(ctx, params as ReverseClosePayload));
   }
 }

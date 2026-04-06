@@ -45,6 +45,60 @@ Playground docs:
 
 - [playground/README.md](../playground/README.md)
 
+Current CLI UX update:
+
+- current recommended syntax: `coord [@sender] -command [@target|%cluster] [args...] [--options...]`
+- `@name` or `@host:port` selects a node
+- `%cluster` selects a cluster
+- `@./file.txt` or `f:./file.txt` passes a file payload
+- when exactly one local daemon exists in the current root, `@sender` is implicit
+- when multiple local daemons exist, `@sender` is required for commands that need local execution context
+
+Current foundation UX additions implemented in this repo:
+
+- automatic peer learning on successful RPCs
+- `-peers` to show learned peer identity/path state
+- `-routes` to show effective routing policy and path shape
+- `-connect` to create a durable reverse path
+- `-learn` to import peer suggestions from another node
+- explicit proxy policy with `-route:add`
+- proxy default mode with `-proxy:on` / `-proxy:off`
+
+Current path notation:
+
+- `A -> B`: normal direct hop
+- `D -> P -> A`: normal proxied path
+- `D -> P -< A`: proxied path whose last hop uses a reverse connection opened by `A`
+
+Current peer/routing mental model:
+
+- `-peers` answers: "who do I know, and what is my best known way to reach them?"
+- `-routes` answers: "what path will I actually take, including explicit route policy?"
+- a one-off direct call usually yields:
+  - caller sees `WAYS=out`
+  - callee sees `WAYS=in`
+- `-connect ... --ttl=0` upgrades the relationship to `WAYS=both` with state `connected`
+
+Examples of the current UX:
+
+- direct learn:
+  - `./scripts/coord @A -whoami @127.0.0.1:4104`
+  - `./scripts/coord @A -peers`
+- reverse connect:
+  - `./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0`
+  - `./scripts/coord @P -whoami @A`
+- proxy through a reverse-connected proxy:
+  - `./scripts/coord @D -learn @P`
+  - `./scripts/coord @D -route:add @A @P`
+  - `./scripts/coord @D -echo @A "hello from D" --verbose`
+- learned reply path:
+  - `./scripts/coord @A -route:deny @D out`
+  - `./scripts/coord @A -whoami @D --verbose`
+
+Implementation note:
+
+- reverse connections are runtime-scoped today: `--ttl=0` means "keep it until disconnected or the daemon stops", not "survive daemon restart"
+
 1) What cord is for
 cord provides four big capabilities:
 Connectivity & RPC: nodes can call methods on other nodes, optionally via a router relay.
@@ -1321,3 +1375,181 @@ Enforce at runtime:
 
 if A has route to D via P, then A forwards once to P, and P must deliver directly to D.
 No nested proxy forwarding.
+
+10) 2026 CLI and connectivity addendum
+
+The implementation in this repo now goes beyond the older target-first examples above.
+
+The current operator-facing syntax is:
+
+coord [@sender] -command [@target|%cluster] [args...] [--options...]
+
+10.1 Selector meanings
+
+@A
+node selector by learned node id / name
+
+@157.250.198.83:4104
+direct node selector by address
+
+%offline
+cluster selector
+
+@./payload.json
+file payload shortcut
+
+f:./payload.json
+explicit file payload syntax
+
+10.2 Sender selection
+
+If exactly one local daemon exists under the current `COORD_PLAYGROUND_ROOT`, sender selection is implicit.
+
+Examples:
+
+./scripts/coord -whoami
+./scripts/coord -peers
+
+If multiple local daemons exist, sender must be explicit:
+
+./scripts/coord @A -peers
+./scripts/coord @D -echo @A "hello"
+
+10.3 Automatic peer learning
+
+Any successful RPC now updates peer knowledge on both sides.
+
+Direct call example:
+
+./scripts/coord @A -whoami @127.0.0.1:4104
+
+Effects:
+
+- A learns peer `P` with `VIA=127.0.0.1:4104`, `WAYS=out`
+- P learns peer `A` with `VIA=127.0.0.1:4101`, `WAYS=in`
+
+This is intentionally asymmetric. A one-off response to an outbound HTTP request does not imply a durable reverse path.
+
+10.4 Reverse connections
+
+`-connect` creates a long-lived reverse session from the sender into the selected direct peer.
+
+Example:
+
+./scripts/coord @A -connect @157.250.198.83:4104 --ttl=0
+
+Effects:
+
+- A keeps polling P
+- P can enqueue RPC work back to A
+- peer state becomes `STATE=connected`
+- A sees `VIA=<direct addr>`
+- P sees `VIA=reverse`
+
+`--ttl=0` currently means "keep it until disconnected or until the daemon stops". It is not yet persisted across daemon restarts.
+
+10.5 `-peers` semantics
+
+`-peers` shows the best currently known path to each peer.
+
+Columns:
+
+- `VIA`
+  - direct address for direct reachability
+  - `via P` for proxy reachability
+  - `reverse` when the peer opened a reverse session into this node
+- `WAYS`
+  - `out`: this node has recently sent to that peer
+  - `in`: that peer has recently reached this node
+  - `both`: both directions are established, usually via `-connect`
+  - `-`: imported suggestion that has not been verified yet
+- `STATE`
+  - `learned`
+  - `suggested`
+  - `connected`
+
+10.6 `-routes` semantics
+
+`-routes` answers a different question than `-peers`.
+
+- `-peers` = identity plus best known peer path
+- `-routes` = effective routing decision, including explicit `-route:add`, deny rules, and the rendered path
+
+Examples of rendered paths:
+
+- `A -> B`
+- `A -> P -> D`
+- `D -> P -< A`
+
+The `-<` notation means the last hop uses a reverse connection opened by the destination side.
+
+10.7 Suggested peers vs learned peers
+
+`-learn @P` imports peer knowledge from `P`, but imported peers stay in `STATE=suggested` until used successfully.
+
+Example:
+
+./scripts/coord @D -learn @P
+./scripts/coord @D -peers
+
+Typical result:
+
+A via P appears as:
+
+- `VIA=via P`
+- `WAYS=-`
+- `STATE=suggested`
+
+After:
+
+./scripts/coord @D -route:add @A @P
+./scripts/coord @D -echo @A "hello from D" --verbose
+
+the route is verified and the CLI prints:
+
+D -> P -< A
+
+10.8 Learned reply paths
+
+When `D` reaches `A` through proxy `P`, `A` learns that `D` exists via `P`.
+
+This is important for real topologies where:
+
+- `A` can reach public proxy `P`
+- `D` is only reachable from `P`
+- `A` still needs to reply to `D`
+
+To force the reply to use the learned proxy path instead of any direct local shortcut, deny direct outbound first:
+
+./scripts/coord @A -route:deny @D out
+./scripts/coord @A -whoami @D --verbose
+
+Expected route shape:
+
+A -> P -> D
+
+10.9 Current operator flow for the home/VPS topology
+
+Home node:
+
+./scripts/coord -start:4102 home
+./scripts/coord -connect @debian13.ispot.cc:4104 --ttl=0
+./scripts/coord -peers
+
+VPS proxy:
+
+./scripts/coord -start:4104 P
+./scripts/coord @P -peers
+
+VPS worker:
+
+./scripts/coord -start:4105 D
+./scripts/coord @D -learn @P
+./scripts/coord @D -route:add @home @P
+./scripts/coord @D -echo @home "hello from D" --verbose
+
+This produces the mixed path:
+
+D -> P -< home
+
+and after that `home` can reply back through `P` even if `D` is not directly dialable from home.

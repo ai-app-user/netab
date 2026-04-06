@@ -14,6 +14,7 @@ export class CoordCliError extends Error {
 }
 
 const BOOLEAN_OPTIONS = new Set(["json", "pretty", "bestEffort", "quiet", "verbose"]);
+const BASE_COMMANDS = new Set(["start", "stop", "status", "cleanup", "discover", "save", "load", "help"]);
 
 function coerceValue(value: string): unknown {
   if (value === "true") {
@@ -34,23 +35,39 @@ function coerceValue(value: string): unknown {
   return value;
 }
 
-function parseBaseToken(token: string): { baseCmd: string; baseCmdPort: number | null } {
-  const raw = token.slice(1);
-  const [baseCmd, portText] = raw.split(":", 2);
-  return {
-    baseCmd,
-    baseCmdPort: portText ? Number(portText) : null,
-  };
+function isAddrToken(token: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(token) || /^[A-Za-z0-9_.-]+:\d+$/.test(token);
 }
 
-function parseTarget(token: string): Target {
-  if (token.startsWith("#")) {
+function isFileToken(token: string): boolean {
+  return token === "@-" || token.startsWith("f:") || token.startsWith("@./") || token.startsWith("@../") || token.startsWith("@/") || token.startsWith("@~/");
+}
+
+function isSelectorToken(token: string): boolean {
+  return (token.startsWith("@") && !isFileToken(token)) || token.startsWith("%") || token.startsWith("#");
+}
+
+function parseSelector(token: string): Target {
+  if (token.startsWith("%") || token.startsWith("#")) {
     return { kind: "cluster", value: token.slice(1) };
   }
-  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(token) || /^[A-Za-z0-9_.-]+:\d+$/.test(token)) {
-    return { kind: "addr", value: token };
+  const raw = token.startsWith("@") ? token.slice(1) : token;
+  if (isAddrToken(raw)) {
+    return { kind: "addr", value: raw };
   }
-  return { kind: "node", value: token };
+  if (raw.length === 0) {
+    throw new CoordCliError(`ERROR malformed selector "${token}"`, 5);
+  }
+  return { kind: "node", value: raw };
+}
+
+function parseBaseToken(token: string): { baseCmd: string; baseCmdPort: number | null } {
+  const raw = token.startsWith("-") ? token.slice(1) : token;
+  const [head, tail] = raw.split(":", 2);
+  return {
+    baseCmd: head,
+    baseCmdPort: head === "start" && tail ? Number(tail) : null,
+  };
 }
 
 async function readPayloadToken(token: string): Promise<Invocation["payload"]> {
@@ -62,7 +79,7 @@ async function readPayloadToken(token: string): Promise<Invocation["payload"]> {
     const bytes = new Uint8Array(Buffer.concat(chunks));
     return { kind: "bytes", name: "-", bytes };
   }
-  const name = token.slice(1);
+  const name = token.startsWith("f:") ? token.slice(2) : token.slice(1);
   const bytes = new Uint8Array(await readFile(name));
   if (name.endsWith(".json")) {
     return { kind: "json", name, json: JSON.parse(Buffer.from(bytes).toString("utf8")) };
@@ -97,34 +114,9 @@ function consumeOptionToken(argv: string[], index: number, options: Invocation["
   return index + 1;
 }
 
-export async function parseInvocation(argv: string[]): Promise<Invocation> {
-  if (argv.length === 0) {
-    throw new CoordCliError("ERROR no command provided", 5);
-  }
+async function parseLegacyInvocation(argv: string[]): Promise<Invocation> {
   const raw = [...argv];
-  const first = argv[0];
-  if (first.startsWith("-")) {
-    const { baseCmd, baseCmdPort } = parseBaseToken(first);
-    if (!baseCmd) {
-      throw new CoordCliError(`ERROR malformed base command "${first}"`, 5);
-    }
-    return {
-      raw,
-      kind: "base",
-      baseCmd,
-      baseCmdPort,
-      baseArgs: argv.slice(1),
-      target: { kind: "none" },
-      options: {},
-      group: "base",
-      cmd: baseCmd,
-      fullCmd: `base:${baseCmd}`,
-      params: {},
-      args: argv.slice(1).map(coerceValue),
-    };
-  }
-
-  const target = parseTarget(first);
+  const target = parseSelector(argv[0].startsWith("@") || argv[0].startsWith("#") || argv[0].startsWith("%") ? argv[0] : `@${argv[0]}`);
   let index = 1;
   const options: Invocation["options"] = {};
   while (index < argv.length && argv[index].startsWith("--")) {
@@ -147,7 +139,7 @@ export async function parseInvocation(argv: string[]): Promise<Invocation> {
       index = consumeOptionToken(argv, index, options);
       continue;
     }
-    if (token.startsWith("@")) {
+    if (isFileToken(token)) {
       payload = await readPayloadToken(token);
       index += 1;
       continue;
@@ -164,6 +156,98 @@ export async function parseInvocation(argv: string[]): Promise<Invocation> {
   return {
     raw,
     kind: "targeted",
+    sender: { kind: "none" },
+    target,
+    options,
+    group,
+    cmd,
+    fullCmd: `${group}:${cmd}`,
+    params,
+    args,
+    payload,
+  };
+}
+
+export async function parseInvocation(argv: string[]): Promise<Invocation> {
+  if (argv.length === 0) {
+    throw new CoordCliError("ERROR no command provided", 5);
+  }
+  const raw = [...argv];
+  let index = 0;
+  let sender: Target = { kind: "none" };
+
+  if (isSelectorToken(argv[index])) {
+    sender = parseSelector(argv[index]);
+    index += 1;
+  }
+
+  const cmdToken = argv[index];
+  if (!cmdToken) {
+    throw new CoordCliError("ERROR missing command token", 5);
+  }
+
+  if (!cmdToken.startsWith("-")) {
+    return parseLegacyInvocation(argv);
+  }
+
+  const commandToken = cmdToken.slice(1);
+  if (!commandToken) {
+    throw new CoordCliError(`ERROR malformed command "${cmdToken}"`, 5);
+  }
+  index += 1;
+
+  const baseMeta = parseBaseToken(cmdToken);
+  const isBase = BASE_COMMANDS.has(baseMeta.baseCmd);
+  const target = index < argv.length && isSelectorToken(argv[index]) ? parseSelector(argv[index++]) : { kind: "none" } satisfies Target;
+  const options: Invocation["options"] = {};
+  const params: Record<string, unknown> = {};
+  const args: unknown[] = [];
+  let payload: Invocation["payload"];
+
+  while (index < argv.length) {
+    const token = argv[index];
+    if (token.startsWith("--")) {
+      index = consumeOptionToken(argv, index, options);
+      continue;
+    }
+    if (isFileToken(token)) {
+      payload = await readPayloadToken(token);
+      index += 1;
+      continue;
+    }
+    if (token.includes("=")) {
+      const [key, value] = token.split("=", 2);
+      params[key] = coerceValue(value);
+    } else {
+      args.push(coerceValue(token));
+    }
+    index += 1;
+  }
+
+  if (isBase) {
+    return {
+      raw,
+      kind: "base",
+      sender,
+      baseCmd: baseMeta.baseCmd,
+      baseCmdPort: baseMeta.baseCmdPort,
+      baseArgs: [...(target.kind !== "none" ? [target.value] : []), ...args.map((value) => String(value))],
+      target,
+      options,
+      group: "base",
+      cmd: baseMeta.baseCmd,
+      fullCmd: `base:${baseMeta.baseCmd}`,
+      params,
+      args,
+      payload,
+    };
+  }
+
+  const [group, cmd] = commandToken.includes(":") ? commandToken.split(":", 2) : ["foundation", commandToken];
+  return {
+    raw,
+    kind: "targeted",
+    sender,
     target,
     options,
     group,
@@ -231,7 +315,7 @@ export class CoordCommandRegistry implements CommandRegistry {
     const handler = this.commandHandlers.get(inv.fullCmd);
     if (!handler) {
       const example = matchingGroupCommands[0];
-      throw new CoordCliError(`ERROR unknown command "${inv.fullCmd}"${example ? ` (try "coord <target> ${example}")` : ""}`, 4);
+      throw new CoordCliError(`ERROR unknown command "${inv.fullCmd}"${example ? ` (try "coord -${example.replace("foundation:", "")}")` : ""}`, 4);
     }
     return handler.handler(inv, ctx);
   }

@@ -66,6 +66,7 @@ export type RpcAuth = {
 export type RpcCtx = {
   auth?: RpcAuth;
   srcNodeId?: string;
+  srcNodeInfo?: NodeInfo;
   originNodeId?: string;
   traceId?: string;
 };
@@ -81,17 +82,13 @@ export type RouteDirection = "in" | "out" | "both";
 
 export type RouteEntry = {
   nodeId: string;
-  summary: string;
-  mode: "direct" | "proxy" | "none";
-  proxyNodeId?: string;
+  via: string;
+  path: string;
+  ways: "out" | "in" | "both" | "-";
+  state: "connected" | "learned" | "suggested" | "configured";
   denyIn: boolean;
   denyOut: boolean;
-  observedIn: boolean;
-  observedOut: boolean;
-  lastInboundMs: number | null;
-  lastOutboundMs: number | null;
-  ttlRemainingInMs: number | null;
-  ttlRemainingOutMs: number | null;
+  ttlRemainingMs: number | null;
 };
 
 export type RouteTable = {
@@ -104,6 +101,22 @@ export type RouteTable = {
   entries: RouteEntry[];
 };
 
+export type PeerEntry = {
+  nodeId: string;
+  via: string;
+  ways: "out" | "in" | "both" | "-";
+  ttlRemainingMs: number | null;
+  state: "connected" | "learned" | "suggested";
+  nodeEpoch?: string;
+  addrs?: string[];
+  props?: unknown;
+};
+
+export type PeerTable = {
+  nodeId: string;
+  entries: PeerEntry[];
+};
+
 export interface FoundationNode {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -112,7 +125,11 @@ export interface FoundationNode {
   call<T>(target: RpcTarget, method: string, params: unknown, opts?: RpcCallOptions): Promise<T>;
   ping(target: RpcTarget): Promise<{ ok: boolean; rttMs: number }>;
   discover(opts?: { mode?: "udp" | "mdns" | "seeds"; timeoutMs?: number }): Promise<NodeInfo[]>;
+  getPeerTable(opts?: { verbose?: boolean }): Promise<PeerTable>;
   getRouteTable(opts?: { verbose?: boolean }): Promise<RouteTable>;
+  connect(target: RpcTarget, opts?: { ttlMs?: number }): Promise<{ ok: true; peer: NodeInfo; ttlMs: number | null }>;
+  disconnect(targetNodeId: string): Promise<{ ok: true; nodeId: string }>;
+  learn(target: RpcTarget): Promise<{ ok: true; learned: string[]; skipped: string[] }>;
   setRoute(targetNodeId: string, proxyNodeId?: string): Promise<void>;
   deleteRoute(targetNodeId: string): Promise<void>;
   setRouteDeny(targetNodeId: string, direction: RouteDirection): Promise<void>;
@@ -239,6 +256,7 @@ export type Target =
 export type Invocation = {
   raw: string[];
   kind: "base" | "targeted";
+  sender: Target;
   baseCmd?: string;
   baseCmdPort?: number | null;
   baseArgs?: string[];
