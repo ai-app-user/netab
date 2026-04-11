@@ -1,4 +1,4 @@
-import { CordNode, CordRegistry } from "../index.js";
+import { CordNode, CordRegistry } from '../index.js';
 
 /**
  * Run a focused foundation-layer demo:
@@ -12,17 +12,17 @@ async function main() {
   const registry = new CordRegistry();
 
   const nodeA = new CordNode(registry, {
-    nodeId: "node-a",
-    addrs: ["10.0.0.10:4001"],
-    props: { type: "tablet", model: "demo-a" },
+    nodeId: 'node-a',
+    addrs: ['10.0.0.10:4001'],
+    props: { type: 'tablet', model: 'demo-a' },
   });
   const nodeB = new CordNode(registry, {
-    nodeId: "node-b",
-    addrs: ["10.0.0.11:4002"],
-    props: { type: "tablet", model: "demo-b" },
+    nodeId: 'node-b',
+    addrs: ['10.0.0.11:4002'],
+    props: { type: 'tablet', model: 'demo-b' },
   });
 
-  nodeB.registerHandler("demo.foundation.echo", async (ctx, params) => {
+  nodeB.registerHandler('demo.foundation.echo', async (ctx, params) => {
     return {
       handledBy: nodeB.self().nodeId,
       srcNodeId: ctx.srcNodeId ?? null,
@@ -38,27 +38,27 @@ async function main() {
     const auth = nodeA.foundation.makeInternalAuth();
     const discovered = await nodeA.discover();
     const whoamiByNode = await nodeA.call(
-      { nodeId: "node-b" },
-      "cord.foundation.whoami",
+      { nodeId: 'node-b' },
+      'cord.foundation.whoami',
       {},
-      { auth, traceId: "foundation-whoami-node" },
+      { auth, traceId: 'foundation-whoami-node' },
     );
     const whoamiByAddr = await nodeA.call(
-      { addr: "10.0.0.11:4002" },
-      "cord.foundation.whoami",
+      { addr: '10.0.0.11:4002' },
+      'cord.foundation.whoami',
       {},
-      { auth, traceId: "foundation-whoami-addr" },
+      { auth, traceId: 'foundation-whoami-addr' },
     );
     const echo = await nodeA.call(
-      { addr: "10.0.0.11:4002" },
-      "demo.foundation.echo",
+      { addr: '10.0.0.11:4002' },
+      'demo.foundation.echo',
       {
-        message: "hello from node-a",
+        message: 'hello from node-a',
         count: 2,
       },
-      { auth, timeoutMs: 1000, traceId: "foundation-echo-1" },
+      { auth, timeoutMs: 1000, traceId: 'foundation-echo-1' },
     );
-    const ping = await nodeA.ping({ nodeId: "node-b" });
+    const ping = await nodeA.ping({ nodeId: 'node-b' });
 
     console.log(
       JSON.stringify(

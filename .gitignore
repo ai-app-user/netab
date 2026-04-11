@@ -3,3 +3,13 @@ dist/
 coverage/
 .codex
 tmp/
+.gradle/
+.idea/
+local.properties
+**/local.properties
+**/build/
+*.apk
+*.aab
+*.apks
+*.keystore
+deploy/android/out/

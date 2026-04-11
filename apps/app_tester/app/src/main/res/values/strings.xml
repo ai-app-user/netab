@@ -1,0 +1,79 @@
+<resources>
+  <string name="app_name">App Tester</string>
+  <string name="screen_title">Netab App Tester</string>
+  <string name="screen_subtitle">Guided mobile playground for the real embedded Android coord node and local steng storage on SQLite.</string>
+  <string name="select_app">1. Select app to test</string>
+  <string name="select_command">2. Select command</string>
+  <string name="command_description">Command description</string>
+  <string name="command_description_placeholder">Choose a command to see what it does.</string>
+  <string name="command_params">3. Fill parameters</string>
+  <string name="run_command">Run command</string>
+  <string name="help_short">?</string>
+  <string name="status_ready">Status: ready</string>
+  <string name="context_placeholder">Current environment details appear here.</string>
+  <string name="latest_output">Latest output</string>
+  <string name="latest_output_placeholder">Command output appears here right after you run it.</string>
+  <string name="history_output">Recent history</string>
+  <string name="history_placeholder">Previous command outputs are kept here.</string>
+  <string name="no_params_required">This command has no parameters.</string>
+
+  <string name="section_local">Local App State</string>
+  <string name="section_steng">Local Steng Data</string>
+  <string name="section_remote">Remote coord Sender</string>
+  <string name="section_quick_actions">Quick Foundation Actions</string>
+  <string name="section_routing">Routing Controls</string>
+  <string name="section_tools">Tools</string>
+  <string name="section_advanced">Advanced Raw RPC</string>
+
+  <string name="node_name_hint">Node alias used in helper commands</string>
+  <string name="local_port_hint">Embedded Android coord port</string>
+  <string name="sender_url_hint">http://host:port or http://host:port/healthz</string>
+  <string name="target_hint">Target node name or host:port</string>
+  <string name="proxy_node_hint">Proxy node name</string>
+  <string name="ttl_seconds_hint">TTL seconds for connect (blank = persistent forever, 0 = runtime only)</string>
+  <string name="timeout_seconds_hint">Timeout seconds</string>
+  <string name="steng_app_hint">Steng app id</string>
+  <string name="steng_db_hint">Steng db id</string>
+  <string name="steng_table_hint">Steng table name</string>
+  <string name="steng_json_hint">JSON document to add locally</string>
+  <string name="echo_hint">Echo text</string>
+  <string name="sleep_ms_hint">Sleep milliseconds</string>
+  <string name="exec_command_hint">Shell command, for example uname -a</string>
+  <string name="only_os_hint">Optional OS filter, for example linux,windows</string>
+  <string name="raw_method_hint">Remote method, for example cord.cluster.listNodes</string>
+  <string name="raw_params_hint">JSON params, for example {"clusterId":"offline"}</string>
+
+  <string name="save_settings">Save settings</string>
+  <string name="start_local_node">Start local embedded node</string>
+  <string name="stop_local_node">Stop local embedded node</string>
+  <string name="show_local_status">Show local embedded status</string>
+  <string name="use_local_sender_url">Use local sender URL</string>
+  <string name="run_sqlite_smoke_test">Run SQLite smoke test</string>
+  <string name="steng_ensure_table">Ensure local steng table</string>
+  <string name="steng_add_doc">Add local steng doc</string>
+  <string name="steng_list_docs">List local steng docs</string>
+  <string name="probe_sender_health">Probe sender /healthz</string>
+  <string name="sender_whoami">Sender whoami</string>
+  <string name="target_whoami">Target whoami</string>
+  <string name="ping_target">Ping target</string>
+  <string name="show_peers">Show peers</string>
+  <string name="show_routes">Show routes</string>
+  <string name="connect_target">Connect target</string>
+  <string name="learn_target">Learn target</string>
+  <string name="disconnect_target">Disconnect target</string>
+  <string name="route_add">Route add target via proxy</string>
+  <string name="route_delete">Route delete target</string>
+  <string name="route_deny_in">Route deny in</string>
+  <string name="route_deny_out">Route deny out</string>
+  <string name="route_deny_both">Route deny both</string>
+  <string name="proxy_on_target">Proxy on target</string>
+  <string name="proxy_off">Proxy off</string>
+  <string name="echo_target">Echo on sender or target</string>
+  <string name="sleep_target">Sleep on sender or target</string>
+  <string name="raw_call_on_sender">Raw call on sender</string>
+  <string name="raw_call_on_target">Raw call on target via sender</string>
+  <string name="copy_vps_commands">Copy VPS route commands</string>
+
+  <string name="environment_placeholder">Environment info appears here.</string>
+  <string name="log_placeholder">Activity log appears here.</string>
+</resources>

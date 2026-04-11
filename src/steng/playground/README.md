@@ -43,7 +43,7 @@ You can also run the same file directly with a backend switch:
 ```bash
 tsx src/steng/playground/basic.ts --backend memory
 tsx src/steng/playground/basic.ts --backend sqlite
-tsx src/steng/playground/basic.ts --backend postgres
+STENG_POSTGRES_URL=postgres://user:pass@host/db tsx src/steng/playground/basic.ts --backend postgres
 ```
 
 Or via environment variable:
@@ -51,6 +51,7 @@ Or via environment variable:
 ```bash
 STENG_BACKEND=sqlite tsx src/steng/playground/basic.ts
 STENG_CLUSTER_SHORT=mi1a tsx src/steng/playground/basic.ts --backend memory
+STENG_POSTGRES_URL=postgres://user:pass@host/db STENG_POSTGRES_SCHEMA=steng_playground tsx src/steng/playground/basic.ts --backend postgres
 ```
 
 The shared playground now does:
@@ -81,13 +82,13 @@ Useful direct forms:
 
 ```bash
 tsx src/steng/playground/snapshot.ts --backend memory --restore-backend sqlite
-tsx src/steng/playground/snapshot.ts --backend sqlite --restore-backend postgres --out ./tmp/orders.tar.gz
+STENG_RESTORE_POSTGRES_URL=postgres://user:pass@host/db tsx src/steng/playground/snapshot.ts --backend sqlite --restore-backend postgres --out ./tmp/orders.tar.gz
 ```
 
 Or with environment variables:
 
 ```bash
-STENG_BACKEND=postgres STENG_RESTORE_BACKEND=memory tsx src/steng/playground/snapshot.ts
+STENG_BACKEND=postgres STENG_POSTGRES_URL=postgres://user:pass@host/db STENG_RESTORE_BACKEND=memory tsx src/steng/playground/snapshot.ts
 STENG_SNAPSHOT_OUT=./tmp/orders.tar.gz tsx src/steng/playground/snapshot.ts --backend sqlite
 ```
 
@@ -145,7 +146,7 @@ What it shows:
 
 - the same basic CRUD flow as `basic.ts`
 - backend set to Postgres
-- uses embedded `pg-mem` by default so it works without a server
+- requires a real Postgres server via `STENG_POSTGRES_URL` or `--pg-url`
 - kept as a small compatibility entrypoint if you want a dedicated file name
 
 ## How to Extend a Playground

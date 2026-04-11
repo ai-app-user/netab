@@ -1,6 +1,10 @@
-import { CordFoundation } from "./foundation.js";
-import { CordClusterManager, leaseMsFromConfig, priorityFromConfig } from "./cluster.js";
-import { CordRegistry } from "./registry.js";
+import { CordFoundation } from './foundation.js';
+import {
+  CordClusterManager,
+  leaseMsFromConfig,
+  priorityFromConfig,
+} from './cluster.js';
+import { CordRegistry } from './registry.js';
 import type {
   ClusterNodeConfig,
   ClusterSpec,
@@ -8,47 +12,70 @@ import type {
   LeaderAssignment,
   LeaderChangeEvent,
   ShardSpec,
-} from "./types.js";
-import type { CoordStore } from "./types.js";
+} from './types.js';
+import type { CoordStore } from './types.js';
 
+/** One in-memory lease vote retained by a follower node. */
 type LeaseVote = {
   leaderNodeId: string;
   term: number;
   leaseUntilMs: number;
 };
 
+/** Runtime tuning knobs for the election manager. */
 type ElectionOptions = {
   leaseMs: number;
   electionIntervalMs: number;
   defaultClusterId?: string;
 };
 
+/** Durable key for one shard definition. */
 function shardKey(clusterId: string, shardId: string): string {
   return `election/shards/${clusterId}/${shardId}`;
 }
 
+/** Durable key for one current leader assignment. */
 function assignmentKey(clusterId: string, shardId: string): string {
   return `election/assignments/${clusterId}/${shardId}`;
 }
 
+/**
+ * Normalizes shard.
+ * @param shardId Shard id.
+ * @param value Value to process.
+ */
 function normalizeShard(shardId: string, value: unknown): ShardSpec {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     return {
       shardId,
-      weight: typeof record.weight === "number" ? record.weight : undefined,
+      weight: typeof record.weight === 'number' ? record.weight : undefined,
       props: record.props,
     };
   }
   return { shardId };
 }
 
-function normalizeAssignment(clusterId: string, shardId: string, value: unknown): LeaderAssignment | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+/**
+ * Normalizes assignment.
+ * @param clusterId Cluster identifier.
+ * @param shardId Shard id.
+ * @param value Value to process.
+ */
+function normalizeAssignment(
+  clusterId: string,
+  shardId: string,
+  value: unknown,
+): LeaderAssignment | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (typeof record.leaderNodeId !== "string" || typeof record.term !== "number" || typeof record.leaseUntilMs !== "number") {
+  if (
+    typeof record.leaderNodeId !== 'string' ||
+    typeof record.term !== 'number' ||
+    typeof record.leaseUntilMs !== 'number'
+  ) {
     return null;
   }
   return {
@@ -60,24 +87,42 @@ function normalizeAssignment(clusterId: string, shardId: string, value: unknown)
   };
 }
 
-function clusterLeaseMode(spec: ClusterSpec | null): "quorum" | "all" {
-  if (typeof spec?.props === "object" && spec.props !== null && !Array.isArray(spec.props)) {
+/**
+ * Handles cluster lease mode.
+ * @param spec Spec.
+ */
+function clusterLeaseMode(spec: ClusterSpec | null): 'quorum' | 'all' {
+  if (
+    typeof spec?.props === 'object' &&
+    spec.props !== null &&
+    !Array.isArray(spec.props)
+  ) {
     const value = (spec.props as Record<string, unknown>).leaseMode;
-    if (value === "all") {
-      return "all";
+    if (value === 'all') {
+      return 'all';
     }
   }
-  return "quorum";
+  return 'quorum';
 }
 
+/**
+ * Handles shard weight.
+ * @param shard Shard.
+ */
 function shardWeight(shard: ShardSpec): number {
   return shard.weight ?? 1;
 }
 
+/**
+ * Handles lease vote key.
+ * @param clusterId Cluster identifier.
+ * @param shardId Shard id.
+ */
 function leaseVoteKey(clusterId: string, shardId: string): string {
   return `${clusterId}::${shardId}`;
 }
 
+/** Lease-based leader election manager built on cluster membership and foundation RPC. */
 export class CordElectionManager implements ElectionManager {
   private readonly callbacks = new Set<(ev: LeaderChangeEvent) => void>();
   private readonly leaseVotes = new Map<string, LeaseVote>();
@@ -91,6 +136,7 @@ export class CordElectionManager implements ElectionManager {
     private readonly options: ElectionOptions,
   ) {}
 
+  /** Start periodic lease reconciliation. */
   async start(): Promise<void> {
     if (this.electionTimer) {
       return;
@@ -101,6 +147,7 @@ export class CordElectionManager implements ElectionManager {
     }, this.options.electionIntervalMs);
   }
 
+  /** Stop periodic lease reconciliation. */
   async stop(): Promise<void> {
     if (this.electionTimer) {
       clearInterval(this.electionTimer);
@@ -108,49 +155,75 @@ export class CordElectionManager implements ElectionManager {
     }
   }
 
+  /** Add a shard definition and immediately reconcile leadership. */
   async addShard(clusterId: string, shard: ShardSpec): Promise<void> {
     await this.store.set(shardKey(clusterId, shard.shardId), shard);
     await this.tick(clusterId);
   }
 
+  /** Remove a shard definition and its current assignment. */
   async removeShard(clusterId: string, shardId: string): Promise<void> {
     await this.store.del(shardKey(clusterId, shardId));
     const previous = await this.readAssignment(clusterId, shardId);
     await this.store.del(assignmentKey(clusterId, shardId));
     if (previous?.leaderNodeId) {
-      this.emitLeaderChange({ clusterId, shardId, from: previous.leaderNodeId, to: "" });
+      this.emitLeaderChange({
+        clusterId,
+        shardId,
+        from: previous.leaderNodeId,
+        to: '',
+      });
     }
   }
 
+  /** List shard definitions for one cluster. */
   async listShards(clusterId: string): Promise<ShardSpec[]> {
     const items = await this.store.list(`election/shards/${clusterId}/`);
     return items
-      .map(({ key, value }) => normalizeShard(key.slice(`election/shards/${clusterId}/`.length), value))
+      .map(({ key, value }) =>
+        normalizeShard(
+          key.slice(`election/shards/${clusterId}/`.length),
+          value,
+        ),
+      )
       .sort((left, right) => left.shardId.localeCompare(right.shardId));
   }
 
-  async getLeader(clusterId: string, shardId: string): Promise<LeaderAssignment | null> {
+  /** Return the healthy leader assignment for one shard, if any. */
+  async getLeader(
+    clusterId: string,
+    shardId: string,
+  ): Promise<LeaderAssignment | null> {
     await this.tick(clusterId);
     const assignment = await this.readAssignment(clusterId, shardId);
     if (!assignment) {
       return null;
     }
-    return (await this.isHealthyAssignment(clusterId, assignment)) ? assignment : null;
+    return (await this.isHealthyAssignment(clusterId, assignment))
+      ? assignment
+      : null;
   }
 
+  /** List every currently healthy leader assignment in one cluster. */
   async listLeaders(clusterId: string): Promise<LeaderAssignment[]> {
     await this.tick(clusterId);
     const shards = await this.listShards(clusterId);
     const results: LeaderAssignment[] = [];
     for (const shard of shards) {
       const assignment = await this.readAssignment(clusterId, shard.shardId);
-      if (assignment && (await this.isHealthyAssignment(clusterId, assignment))) {
+      if (
+        assignment &&
+        (await this.isHealthyAssignment(clusterId, assignment))
+      ) {
         results.push(assignment);
       }
     }
-    return results.sort((left, right) => left.shardId.localeCompare(right.shardId));
+    return results.sort((left, right) =>
+      left.shardId.localeCompare(right.shardId),
+    );
   }
 
+  /** Subscribe to future leader-change events. */
   onLeaderChange(cb: (ev: LeaderChangeEvent) => void): () => void {
     this.callbacks.add(cb);
     return () => {
@@ -158,7 +231,13 @@ export class CordElectionManager implements ElectionManager {
     };
   }
 
-  async forceLeader(clusterId: string, shardId: string, nodeId: string, ttlMs = this.options.leaseMs): Promise<void> {
+  /** Force one node to become leader for a shard for the provided TTL. */
+  async forceLeader(
+    clusterId: string,
+    shardId: string,
+    nodeId: string,
+    ttlMs = this.options.leaseMs,
+  ): Promise<void> {
     const current = await this.readAssignment(clusterId, shardId);
     const assignment: LeaderAssignment = {
       clusterId,
@@ -169,10 +248,16 @@ export class CordElectionManager implements ElectionManager {
     };
     await this.writeAssignment(assignment);
     if (current?.leaderNodeId !== nodeId) {
-      this.emitLeaderChange({ clusterId, shardId, from: current?.leaderNodeId, to: nodeId });
+      this.emitLeaderChange({
+        clusterId,
+        shardId,
+        from: current?.leaderNodeId,
+        to: nodeId,
+      });
     }
   }
 
+  /** Reconcile one cluster or all local clusters immediately. */
   async tick(clusterId?: string): Promise<void> {
     const targetClusters = clusterId ? [clusterId] : await this.localClusters();
     for (const currentClusterId of targetClusters) {
@@ -180,6 +265,7 @@ export class CordElectionManager implements ElectionManager {
     }
   }
 
+  /** RPC handler used by followers to grant a fresh leader lease vote. */
   async handleRequestLease(params: {
     clusterId: string;
     shardId: string;
@@ -187,7 +273,10 @@ export class CordElectionManager implements ElectionManager {
     ttlMs: number;
     leaderNodeId: string;
   }): Promise<{ ok: boolean; leaseUntilMs: number }> {
-    const member = await this.cluster.getNode(params.clusterId, params.leaderNodeId);
+    const member = await this.cluster.getNode(
+      params.clusterId,
+      params.leaderNodeId,
+    );
     if (!member || member.role.eligibleLeader === false) {
       return { ok: false, leaseUntilMs: 0 };
     }
@@ -202,7 +291,10 @@ export class CordElectionManager implements ElectionManager {
       if (current.term > params.term) {
         return { ok: false, leaseUntilMs: current.leaseUntilMs };
       }
-      if (current.term === params.term && current.leaderNodeId !== params.leaderNodeId) {
+      if (
+        current.term === params.term &&
+        current.leaderNodeId !== params.leaderNodeId
+      ) {
         return { ok: false, leaseUntilMs: current.leaseUntilMs };
       }
     }
@@ -215,6 +307,7 @@ export class CordElectionManager implements ElectionManager {
     return { ok: true, leaseUntilMs };
   }
 
+  /** RPC handler used by followers to renew an existing leader lease vote. */
   async handleRenewLease(params: {
     clusterId: string;
     shardId: string;
@@ -224,7 +317,11 @@ export class CordElectionManager implements ElectionManager {
   }): Promise<{ ok: boolean; leaseUntilMs: number }> {
     const key = leaseVoteKey(params.clusterId, params.shardId);
     const current = this.leaseVotes.get(key);
-    if (!current || current.leaderNodeId !== params.leaderNodeId || current.term !== params.term) {
+    if (
+      !current ||
+      current.leaderNodeId !== params.leaderNodeId ||
+      current.term !== params.term
+    ) {
       return { ok: false, leaseUntilMs: current?.leaseUntilMs ?? 0 };
     }
     const leaseUntilMs = Date.now() + params.ttlMs;
@@ -232,15 +329,29 @@ export class CordElectionManager implements ElectionManager {
     return { ok: true, leaseUntilMs };
   }
 
-  async handleReleaseLease(params: { clusterId: string; shardId: string; term: number; leaderNodeId: string }): Promise<{ ok: boolean }> {
+  /** RPC handler used by leaders to release a follower lease vote. */
+  async handleReleaseLease(params: {
+    clusterId: string;
+    shardId: string;
+    term: number;
+    leaderNodeId: string;
+  }): Promise<{ ok: boolean }> {
     const key = leaseVoteKey(params.clusterId, params.shardId);
     const current = this.leaseVotes.get(key);
-    if (current && current.leaderNodeId === params.leaderNodeId && current.term === params.term) {
+    if (
+      current &&
+      current.leaderNodeId === params.leaderNodeId &&
+      current.term === params.term
+    ) {
       this.leaseVotes.delete(key);
     }
     return { ok: true };
   }
 
+  /**
+   * Handles reconcile cluster.
+   * @param clusterId Cluster identifier.
+   */
   private async reconcileCluster(clusterId: string): Promise<void> {
     const shards = await this.listShards(clusterId);
     if (shards.length === 0) {
@@ -249,18 +360,28 @@ export class CordElectionManager implements ElectionManager {
     const nodes = await this.cluster.listNodes(clusterId);
     const aliveNodes = await this.cluster.getAliveNodes(clusterId);
     const aliveSet = new Set(aliveNodes.map((item) => item.nodeId));
-    const eligible = nodes.filter((node) => aliveSet.has(node.nodeId) && node.role.eligibleLeader !== false && node.role.canReceive !== false);
+    const eligible = nodes.filter(
+      (node) =>
+        aliveSet.has(node.nodeId) &&
+        node.role.eligibleLeader !== false &&
+        node.role.canReceive !== false,
+    );
     if (eligible.length === 0) {
       return;
     }
 
-    const loads = new Map<string, number>(eligible.map((node) => [node.nodeId, 0]));
+    const loads = new Map<string, number>(
+      eligible.map((node) => [node.nodeId, 0]),
+    );
     const retained = new Map<string, LeaderAssignment>();
     for (const shard of shards) {
       const current = await this.readAssignment(clusterId, shard.shardId);
       if (current && (await this.isHealthyAssignment(clusterId, current))) {
         retained.set(shard.shardId, current);
-        loads.set(current.leaderNodeId, (loads.get(current.leaderNodeId) ?? 0) + shardWeight(shard));
+        loads.set(
+          current.leaderNodeId,
+          (loads.get(current.leaderNodeId) ?? 0) + shardWeight(shard),
+        );
       }
     }
 
@@ -278,11 +399,13 @@ export class CordElectionManager implements ElectionManager {
         continue;
       }
       const chosen = [...eligible].sort((left, right) => {
-        const loadDiff = (loads.get(left.nodeId) ?? 0) - (loads.get(right.nodeId) ?? 0);
+        const loadDiff =
+          (loads.get(left.nodeId) ?? 0) - (loads.get(right.nodeId) ?? 0);
         if (loadDiff !== 0) {
           return loadDiff;
         }
-        const priorityDiff = priorityFromConfig(right) - priorityFromConfig(left);
+        const priorityDiff =
+          priorityFromConfig(right) - priorityFromConfig(left);
         if (priorityDiff !== 0) {
           return priorityDiff;
         }
@@ -294,17 +417,41 @@ export class CordElectionManager implements ElectionManager {
       const previous = await this.readAssignment(clusterId, shard.shardId);
       const term = (previous?.term ?? 0) + 1;
       const ttlMs = leaseMsFromConfig(chosen, this.options.leaseMs);
-      const assignment = await this.acquireLease(clusterId, shard.shardId, chosen.nodeId, term, ttlMs);
+      const assignment = await this.acquireLease(
+        clusterId,
+        shard.shardId,
+        chosen.nodeId,
+        term,
+        ttlMs,
+      );
       if (assignment) {
-        loads.set(chosen.nodeId, (loads.get(chosen.nodeId) ?? 0) + shardWeight(shard));
+        loads.set(
+          chosen.nodeId,
+          (loads.get(chosen.nodeId) ?? 0) + shardWeight(shard),
+        );
         if (previous?.leaderNodeId !== assignment.leaderNodeId) {
-          this.emitLeaderChange({ clusterId, shardId: shard.shardId, from: previous?.leaderNodeId, to: assignment.leaderNodeId });
+          this.emitLeaderChange({
+            clusterId,
+            shardId: shard.shardId,
+            from: previous?.leaderNodeId,
+            to: assignment.leaderNodeId,
+          });
         }
       }
     }
   }
 
-  private async maybeRenew(clusterId: string, shard: ShardSpec, current: LeaderAssignment): Promise<void> {
+  /**
+   * Handles maybe renew.
+   * @param clusterId Cluster identifier.
+   * @param shard Shard.
+   * @param current Current value.
+   */
+  private async maybeRenew(
+    clusterId: string,
+    shard: ShardSpec,
+    current: LeaderAssignment,
+  ): Promise<void> {
     const member = await this.cluster.getNode(clusterId, current.leaderNodeId);
     if (!member) {
       return;
@@ -313,14 +460,40 @@ export class CordElectionManager implements ElectionManager {
     if (current.leaseUntilMs - Date.now() > ttlMs / 2) {
       return;
     }
-    const renewed = await this.renewLease(clusterId, shard.shardId, current.leaderNodeId, current.term, ttlMs);
+    const renewed = await this.renewLease(
+      clusterId,
+      shard.shardId,
+      current.leaderNodeId,
+      current.term,
+      ttlMs,
+    );
     if (renewed) {
       await this.writeAssignment(renewed);
     }
   }
 
-  private async acquireLease(clusterId: string, shardId: string, leaderNodeId: string, term: number, ttlMs: number): Promise<LeaderAssignment | null> {
-    const approvals = await this.requestVotes("cord.election.RequestLease", { clusterId, shardId, term, ttlMs, leaderNodeId });
+  /**
+   * Handles acquire lease.
+   * @param clusterId Cluster identifier.
+   * @param shardId Shard id.
+   * @param leaderNodeId Leader node id.
+   * @param term Term.
+   * @param ttlMs TTL ms.
+   */
+  private async acquireLease(
+    clusterId: string,
+    shardId: string,
+    leaderNodeId: string,
+    term: number,
+    ttlMs: number,
+  ): Promise<LeaderAssignment | null> {
+    const approvals = await this.requestVotes('cord.election.RequestLease', {
+      clusterId,
+      shardId,
+      term,
+      ttlMs,
+      leaderNodeId,
+    });
     if (approvals.length === 0) {
       return null;
     }
@@ -335,8 +508,28 @@ export class CordElectionManager implements ElectionManager {
     return assignment;
   }
 
-  private async renewLease(clusterId: string, shardId: string, leaderNodeId: string, term: number, ttlMs: number): Promise<LeaderAssignment | null> {
-    const approvals = await this.requestVotes("cord.election.RenewLease", { clusterId, shardId, term, ttlMs, leaderNodeId });
+  /**
+   * Handles renew lease.
+   * @param clusterId Cluster identifier.
+   * @param shardId Shard id.
+   * @param leaderNodeId Leader node id.
+   * @param term Term.
+   * @param ttlMs TTL ms.
+   */
+  private async renewLease(
+    clusterId: string,
+    shardId: string,
+    leaderNodeId: string,
+    term: number,
+    ttlMs: number,
+  ): Promise<LeaderAssignment | null> {
+    const approvals = await this.requestVotes('cord.election.RenewLease', {
+      clusterId,
+      shardId,
+      term,
+      ttlMs,
+      leaderNodeId,
+    });
     if (approvals.length === 0) {
       return null;
     }
@@ -349,7 +542,21 @@ export class CordElectionManager implements ElectionManager {
     };
   }
 
-  private async requestVotes(method: string, params: { clusterId: string; shardId: string; term: number; ttlMs: number; leaderNodeId: string }): Promise<number[]> {
+  /**
+   * Handles request votes.
+   * @param method Method.
+   * @param params SQL parameters.
+   */
+  private async requestVotes(
+    method: string,
+    params: {
+      clusterId: string;
+      shardId: string;
+      term: number;
+      ttlMs: number;
+      leaderNodeId: string;
+    },
+  ): Promise<number[]> {
     const voters = await this.voters(params.clusterId, params.leaderNodeId);
     if (voters.length === 0) {
       return [];
@@ -360,7 +567,10 @@ export class CordElectionManager implements ElectionManager {
 
     for (const voter of voters) {
       try {
-        const response = await this.foundation.call<{ ok: boolean; leaseUntilMs: number }>({ nodeId: voter.nodeId }, method, params, {
+        const response = await this.foundation.call<{
+          ok: boolean;
+          leaseUntilMs: number;
+        }>({ nodeId: voter.nodeId }, method, params, {
           timeoutMs: this.options.leaseMs,
           auth,
         });
@@ -375,51 +585,123 @@ export class CordElectionManager implements ElectionManager {
     return approvals.length >= required ? approvals : [];
   }
 
-  private async voters(clusterId: string, leaderNodeId: string): Promise<ClusterNodeConfig[]> {
+  /**
+   * Handles voters.
+   * @param clusterId Cluster identifier.
+   * @param leaderNodeId Leader node id.
+   */
+  private async voters(
+    clusterId: string,
+    leaderNodeId: string,
+  ): Promise<ClusterNodeConfig[]> {
     const nodes = await this.cluster.listNodes(clusterId);
-    const aliveNodes = new Set((await this.cluster.getAliveNodes(clusterId)).map((item) => item.nodeId));
-    return nodes.filter((node) => aliveNodes.has(node.nodeId) && node.role.canReceive !== false && this.registry.canReach(node.nodeId, leaderNodeId));
+    const aliveNodes = new Set(
+      (await this.cluster.getAliveNodes(clusterId)).map((item) => item.nodeId),
+    );
+    return nodes.filter(
+      (node) =>
+        aliveNodes.has(node.nodeId) &&
+        node.role.canReceive !== false &&
+        this.registry.canReach(node.nodeId, leaderNodeId),
+    );
   }
 
-  private async requiredVotes(clusterId: string, voterCount: number): Promise<number> {
+  /**
+   * Handles required votes.
+   * @param clusterId Cluster identifier.
+   * @param voterCount Voter count.
+   */
+  private async requiredVotes(
+    clusterId: string,
+    voterCount: number,
+  ): Promise<number> {
     const spec = await this.readClusterSpec(clusterId);
-    return clusterLeaseMode(spec) === "all" ? voterCount : Math.floor((voterCount * 2) / 3) + 1;
+    return clusterLeaseMode(spec) === 'all'
+      ? voterCount
+      : Math.floor((voterCount * 2) / 3) + 1;
   }
 
-  private async isHealthyAssignment(clusterId: string, assignment: LeaderAssignment): Promise<boolean> {
+  /**
+   * Returns whether healthy assignment.
+   * @param clusterId Cluster identifier.
+   * @param assignment Assignment.
+   */
+  private async isHealthyAssignment(
+    clusterId: string,
+    assignment: LeaderAssignment,
+  ): Promise<boolean> {
     if (assignment.leaseUntilMs <= Date.now()) {
       return false;
     }
-    const member = await this.cluster.getNode(clusterId, assignment.leaderNodeId);
+    const member = await this.cluster.getNode(
+      clusterId,
+      assignment.leaderNodeId,
+    );
     if (!member || member.role.eligibleLeader === false) {
       return false;
     }
-    const alive = new Set((await this.cluster.getAliveNodes(clusterId)).map((item) => item.nodeId));
+    const alive = new Set(
+      (await this.cluster.getAliveNodes(clusterId)).map((item) => item.nodeId),
+    );
     if (!alive.has(assignment.leaderNodeId)) {
       return false;
     }
     const voters = await this.voters(clusterId, assignment.leaderNodeId);
-    return voters.length >= (await this.requiredVotes(clusterId, voters.length));
+    return (
+      voters.length >= (await this.requiredVotes(clusterId, voters.length))
+    );
   }
 
+  /**
+   * Handles local clusters.
+   */
   private async localClusters(): Promise<string[]> {
     const memberships = await this.cluster.listLocalClusters();
     return [...new Set(memberships.map((item) => item.clusterId))].sort();
   }
 
-  private async readAssignment(clusterId: string, shardId: string): Promise<LeaderAssignment | null> {
-    return normalizeAssignment(clusterId, shardId, await this.store.get(assignmentKey(clusterId, shardId)));
+  /**
+   * Reads assignment.
+   * @param clusterId Cluster identifier.
+   * @param shardId Shard id.
+   */
+  private async readAssignment(
+    clusterId: string,
+    shardId: string,
+  ): Promise<LeaderAssignment | null> {
+    return normalizeAssignment(
+      clusterId,
+      shardId,
+      await this.store.get(assignmentKey(clusterId, shardId)),
+    );
   }
 
+  /**
+   * Writes assignment.
+   * @param assignment Assignment.
+   */
   private async writeAssignment(assignment: LeaderAssignment): Promise<void> {
-    await this.store.set(assignmentKey(assignment.clusterId, assignment.shardId), assignment);
+    await this.store.set(
+      assignmentKey(assignment.clusterId, assignment.shardId),
+      assignment,
+    );
   }
 
-  private async readClusterSpec(clusterId: string): Promise<ClusterSpec | null> {
+  /**
+   * Reads cluster spec.
+   * @param clusterId Cluster identifier.
+   */
+  private async readClusterSpec(
+    clusterId: string,
+  ): Promise<ClusterSpec | null> {
     const value = await this.store.get(`clusters/spec/${clusterId}`);
     return value ? (value as ClusterSpec) : null;
   }
 
+  /**
+   * Handles emit leader change.
+   * @param event Event.
+   */
   private emitLeaderChange(event: LeaderChangeEvent): void {
     for (const callback of this.callbacks) {
       callback(event);

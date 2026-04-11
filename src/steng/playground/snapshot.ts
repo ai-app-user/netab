@@ -1,17 +1,22 @@
-import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { Steng, type StengBackend } from "../index.js";
+import { mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { Steng, type StengBackend, type StengOptions } from '../index.js';
 
 function isMainModule(): boolean {
-  return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+  return (
+    Boolean(process.argv[1]) &&
+    import.meta.url === pathToFileURL(process.argv[1]).href
+  );
 }
 
 function normalizeBackend(value: string): StengBackend {
-  if (value === "memory" || value === "sqlite" || value === "postgres") {
+  if (value === 'memory' || value === 'sqlite' || value === 'postgres') {
     return value;
   }
-  throw new Error(`Unsupported backend "${value}". Use memory, sqlite, or postgres.`);
+  throw new Error(
+    `Unsupported backend "${value}". Use memory, sqlite, or postgres.`,
+  );
 }
 
 function readFlag(argv: string[], name: string): string | undefined {
@@ -23,17 +28,87 @@ function readFlag(argv: string[], name: string): string | undefined {
   return inline ? inline.slice(name.length + 1) : undefined;
 }
 
-function parseBackend(argv: string[], flag: "--backend" | "--restore-backend", envName: string, fallback: StengBackend): StengBackend {
+function resolveBackendOptions(
+  backend: StengBackend,
+  argv: string[],
+  role: 'source' | 'restore',
+): StengOptions {
+  const clusterShortEnv =
+    role === 'source'
+      ? process.env.STENG_CLUSTER_SHORT?.trim()
+      : process.env.STENG_RESTORE_CLUSTER_SHORT?.trim();
+  const clusterShort = clusterShortEnv || (role === 'source' ? 'demo' : 'rest');
+  if (backend === 'sqlite') {
+    const fileFlag =
+      role === 'source' ? '--sqlite-file' : '--restore-sqlite-file';
+    const envName =
+      role === 'source'
+        ? process.env.STENG_SQLITE_FILE
+        : process.env.STENG_RESTORE_SQLITE_FILE;
+    return {
+      backend,
+      clusterShort,
+      sqlite: {
+        filename: readFlag(argv, fileFlag) ?? envName ?? undefined,
+      },
+    };
+  }
+  if (backend === 'postgres') {
+    const urlFlag = role === 'source' ? '--pg-url' : '--restore-pg-url';
+    const schemaFlag =
+      role === 'source' ? '--pg-schema' : '--restore-pg-schema';
+    const connectionString =
+      readFlag(argv, urlFlag) ??
+      (role === 'source'
+        ? process.env.STENG_POSTGRES_URL
+        : process.env.STENG_RESTORE_POSTGRES_URL);
+    if (!connectionString) {
+      throw new Error(
+        role === 'source'
+          ? 'Postgres source playground requires STENG_POSTGRES_URL or --pg-url postgres://...'
+          : 'Postgres restore playground requires STENG_RESTORE_POSTGRES_URL or --restore-pg-url postgres://...',
+      );
+    }
+    return {
+      backend,
+      clusterShort,
+      postgres: {
+        connectionString,
+        schema:
+          readFlag(argv, schemaFlag) ??
+          (role === 'source'
+            ? process.env.STENG_POSTGRES_SCHEMA
+            : process.env.STENG_RESTORE_POSTGRES_SCHEMA) ??
+          (role === 'source' ? 'steng_snapshot_src' : 'steng_snapshot_restore'),
+      },
+    };
+  }
+  return {
+    backend,
+    clusterShort,
+  };
+}
+
+function parseBackend(
+  argv: string[],
+  flag: '--backend' | '--restore-backend',
+  envName: string,
+  fallback: StengBackend,
+): StengBackend {
   const value = readFlag(argv, flag) ?? process.env[envName];
   return value ? normalizeBackend(value) : fallback;
 }
 
 function resolveOutputPath(argv: string[]): string {
-  const explicit = readFlag(argv, "--out") ?? process.env.STENG_SNAPSHOT_OUT;
+  const explicit = readFlag(argv, '--out') ?? process.env.STENG_SNAPSHOT_OUT;
   if (explicit) {
     return explicit;
   }
-  return join(process.cwd(), "tmp", `steng-playground-snapshot-${Date.now()}.tar.gz`);
+  return join(
+    process.cwd(),
+    'tmp',
+    `steng-playground-snapshot-${Date.now()}.tar.gz`,
+  );
 }
 
 /**
@@ -41,45 +116,51 @@ function resolveOutputPath(argv: string[]): string {
  * second backend to demonstrate that the bundle format is backend-independent.
  */
 export async function runSnapshotPlayground(
-  sourceBackend: StengBackend = "memory",
-  restoreBackend: StengBackend = "memory",
+  sourceBackend: StengBackend = 'memory',
+  restoreBackend: StengBackend = 'memory',
   outputPath: string = resolveOutputPath([]),
 ): Promise<void> {
   await mkdir(dirname(outputPath), { recursive: true });
 
-  const source = new Steng({
-    backend: sourceBackend,
-    clusterShort: process.env.STENG_CLUSTER_SHORT?.trim() || "demo",
-  });
-  const restored = new Steng({
-    backend: restoreBackend,
-    clusterShort: process.env.STENG_RESTORE_CLUSTER_SHORT?.trim() || "rest",
-  });
+  const argv = process.argv.slice(2);
+  const source = new Steng(
+    resolveBackendOptions(sourceBackend, argv, 'source'),
+  );
+  const restored = new Steng(
+    resolveBackendOptions(restoreBackend, argv, 'restore'),
+  );
 
   try {
-    const table = await source.ensure_table("pos", "miami1", "orders", "json");
-    await source.add_index(table.tableId, "status", "str");
-    await source.add_index(table.tableId, "createdAt", "time");
+    const table = await source.ensure_table('pos', 'miami1', 'orders', 'json');
+    await source.add_index(table.tableId, 'status', 'str');
+    await source.add_index(table.tableId, 'createdAt', 'time');
     await source.set_table_config(table.tableId, {
-      timeField: "createdAt",
-      idPrefix: "orders",
+      timeField: 'createdAt',
+      idPrefix: 'orders',
     });
 
     const ready = await source.add_obj(table.tableId, {
       createdAt: Date.now(),
-      status: "READY",
-      orderRef: "demo_100",
+      status: 'READY',
+      orderRef: 'demo_100',
       totalCents: 1599,
     });
     const deleted = await source.add_obj(table.tableId, {
       createdAt: Date.now() - 60_000,
-      status: "CANCELLED",
-      orderRef: "demo_101",
+      status: 'CANCELLED',
+      orderRef: 'demo_101',
       totalCents: 899,
     });
     await source.delete_objs(table.tableId, [deleted.id]);
-    await source.add_blob(table.tableId, "blob_receipt", new Uint8Array([1, 2, 3, 4]), "application/octet-stream");
-    await source.set_watermark(table.tableId, { localMinTimeMs: Date.now() - 3_600_000 });
+    await source.add_blob(
+      table.tableId,
+      'blob_receipt',
+      new Uint8Array([1, 2, 3, 4]),
+      'application/octet-stream',
+    );
+    await source.set_watermark(table.tableId, {
+      localMinTimeMs: Date.now() - 3_600_000,
+    });
 
     const manifest = await source.export_snapshot({
       outputPath,
@@ -89,11 +170,21 @@ export async function runSnapshotPlayground(
 
     const imported = await restored.import_snapshot({
       inputPath: outputPath,
-      mode: "replace",
+      mode: 'replace',
     });
-    const restoredTable = await restored.get_table_info("pos", "miami1", "orders");
+    const restoredTable = await restored.get_table_info(
+      'pos',
+      'miami1',
+      'orders',
+    );
     const restoredRows = restoredTable
-      ? await restored.get_objs(restoredTable.tableId, [ready.id, deleted.id], null, 0, 10)
+      ? await restored.get_objs(
+          restoredTable.tableId,
+          [ready.id, deleted.id],
+          null,
+          0,
+          10,
+        )
       : null;
 
     console.log(
@@ -106,8 +197,12 @@ export async function runSnapshotPlayground(
           imported,
           restoredTable,
           restoredRows: restoredRows?.items ?? [],
-          restoredWatermark: restoredTable ? await restored.get_watermark(restoredTable.tableId) : null,
-          restoredBlob: restoredTable ? await restored.get_blob(restoredTable.tableId, "blob_receipt") : null,
+          restoredWatermark: restoredTable
+            ? await restored.get_watermark(restoredTable.tableId)
+            : null,
+          restoredBlob: restoredTable
+            ? await restored.get_blob(restoredTable.tableId, 'blob_receipt')
+            : null,
         },
         null,
         2,
@@ -121,12 +216,24 @@ export async function runSnapshotPlayground(
 
 if (isMainModule()) {
   const argv = process.argv.slice(2);
-  const sourceBackend = parseBackend(argv, "--backend", "STENG_BACKEND", "memory");
-  const restoreBackend = parseBackend(argv, "--restore-backend", "STENG_RESTORE_BACKEND", "memory");
+  const sourceBackend = parseBackend(
+    argv,
+    '--backend',
+    'STENG_BACKEND',
+    'memory',
+  );
+  const restoreBackend = parseBackend(
+    argv,
+    '--restore-backend',
+    'STENG_RESTORE_BACKEND',
+    'memory',
+  );
   const outputPath = resolveOutputPath(argv);
 
-  runSnapshotPlayground(sourceBackend, restoreBackend, outputPath).catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+  runSnapshotPlayground(sourceBackend, restoreBackend, outputPath).catch(
+    (error) => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
 }

@@ -1,8 +1,16 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { dirname, join, posix } from "node:path";
-import { deepClone, sha256Hex } from "../../shared/utils.js";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join, posix } from 'node:path';
+import { deepClone, sha256Hex } from '../../shared/utils.js';
 import type {
   ExportSnapshotOptions,
   ImportSnapshotConflictMode,
@@ -19,11 +27,28 @@ import type {
   SnapshotTableSelection,
   TableInfo,
   Watermark,
-} from "../types.js";
+} from '../types.js';
 
 type TarModule = {
-  c(options: { cwd: string; file: string; gzip?: boolean }, files: string[]): Promise<void>;
-  x(options: { cwd: string; file: string; gzip?: boolean; filter?: (path: string) => boolean }): Promise<void>;
+  /**
+   * Handles c.
+   * @param options Operation options.
+   * @param files Files.
+   */
+  c(
+    options: { cwd: string; file: string; gzip?: boolean },
+    files: string[],
+  ): Promise<void>;
+  /**
+   * Handles x.
+   * @param options Operation options.
+   */
+  x(options: {
+    cwd: string;
+    file: string;
+    gzip?: boolean;
+    filter?: (path: string) => boolean;
+  }): Promise<void>;
 };
 
 type SnapshotExportBlob = {
@@ -73,53 +98,111 @@ export type ResolvedSnapshotImportOptions = {
 };
 
 export interface SnapshotExportBackend {
-  backendName: SnapshotManifest["sourceBackend"];
+  backendName: SnapshotManifest['sourceBackend'];
+  /**
+   * Lists tables.
+   */
   listTables(): Promise<TableInfo[]>;
-  exportTable(table: TableInfo, selection: SnapshotTableSelection): Promise<SnapshotExportTableData>;
+  /**
+   * Exports table.
+   * @param table Table descriptor.
+   * @param selection Snapshot selection.
+   */
+  exportTable(
+    table: TableInfo,
+    selection: SnapshotTableSelection,
+  ): Promise<SnapshotExportTableData>;
 }
 
 export interface SnapshotImportBackend {
-  importTable(table: SnapshotImportTableData, options: ResolvedSnapshotImportOptions): Promise<SnapshotImportTableResult>;
+  /**
+   * Imports table.
+   * @param table Table descriptor.
+   * @param options Operation options.
+   */
+  importTable(
+    table: SnapshotImportTableData,
+    options: ResolvedSnapshotImportOptions,
+  ): Promise<SnapshotImportTableResult>;
 }
 
 const require = createRequire(import.meta.url);
-const tar = require("tar") as TarModule;
-const SNAPSHOT_VERSION: SnapshotManifest["formatVersion"] = "steng.snapshot.v1";
+const tar = require('tar') as TarModule;
+const SNAPSHOT_VERSION: SnapshotManifest['formatVersion'] = 'steng.snapshot.v1';
 
+/**
+ * Handles bundle join.
+ * @param parts Parts.
+ */
 function bundleJoin(...parts: string[]): string {
   return posix.join(...parts);
 }
 
+/**
+ * Handles encode path segment.
+ * @param value Value to process.
+ */
 function encodePathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
+/**
+ * Resolves bundle path.
+ * @param rootPath Root path to use.
+ * @param relativePath Path relative to the bundle root.
+ */
 function resolveBundlePath(rootPath: string, relativePath: string): string {
-  return join(rootPath, ...relativePath.split("/"));
+  return join(rootPath, ...relativePath.split('/'));
 }
 
+/**
+ * Handles table key.
+ * @param app Application name.
+ * @param db Database name.
+ * @param tableName Table name.
+ */
 function tableKey(app: string, db: string, tableName: string): string {
   return `${app}::${db}::${tableName}`;
 }
 
+/**
+ * Returns whether this has scoped selectors.
+ * @param scope Scope selector.
+ */
 function hasScopedSelectors(scope: SnapshotScope | undefined): boolean {
-  return Boolean(scope?.apps?.length || scope?.dbs?.length || scope?.tables?.length);
+  return Boolean(
+    scope?.apps?.length || scope?.dbs?.length || scope?.tables?.length,
+  );
 }
 
-function resolveSnapshotFormat(path: string, explicit: SnapshotFormat | undefined): SnapshotFormat {
+/**
+ * Resolves snapshot format.
+ * @param path Filesystem path.
+ * @param explicit Explicit value from the caller.
+ */
+function resolveSnapshotFormat(
+  path: string,
+  explicit: SnapshotFormat | undefined,
+): SnapshotFormat {
   if (explicit) {
     return explicit;
   }
-  if (path.endsWith(".tar.gz") || path.endsWith(".tgz")) {
-    return "tar.gz";
+  if (path.endsWith('.tar.gz') || path.endsWith('.tgz')) {
+    return 'tar.gz';
   }
-  if (path.endsWith(".tar")) {
-    return "tar";
+  if (path.endsWith('.tar')) {
+    return 'tar';
   }
-  return "directory";
+  return 'directory';
 }
 
-function defaultTableSelection(options: ExportSnapshotOptions): SnapshotTableSelection {
+/**
+ * Returns the default table selection.
+ * @param options Operation options.
+ */
+function defaultTableSelection(
+  options: ExportSnapshotOptions,
+): SnapshotTableSelection {
   return {
     filter: null,
     includeBlobs: options.includeBlobs ?? true,
@@ -127,10 +210,15 @@ function defaultTableSelection(options: ExportSnapshotOptions): SnapshotTableSel
   };
 }
 
+/**
+ * Handles table selection from defaults.
+ * @param defaults Defaults.
+ * @param override Override.
+ */
 function tableSelectionFromDefaults(
   defaults: SnapshotTableSelection,
   override?: {
-    filter?: SnapshotTableSelection["filter"];
+    filter?: SnapshotTableSelection['filter'];
     includeBlobs?: boolean;
     includeTombstones?: boolean;
   },
@@ -139,17 +227,32 @@ function tableSelectionFromDefaults(
   return {
     filter,
     includeBlobs: override?.includeBlobs ?? defaults.includeBlobs,
-    includeTombstones: filter ? false : (override?.includeTombstones ?? defaults.includeTombstones),
+    includeTombstones: filter
+      ? false
+      : (override?.includeTombstones ?? defaults.includeTombstones),
   };
 }
 
+/**
+ * Handles matches coarse scope.
+ * @param info Table metadata.
+ * @param scope Scope selector.
+ */
 function matchesCoarseScope(info: TableInfo, scope: SnapshotScope): boolean {
   const appMatch = !scope.apps?.length || scope.apps.includes(info.app);
   const dbMatch = !scope.dbs?.length || scope.dbs.includes(info.db);
   return appMatch && dbMatch;
 }
 
-function resolveSelections(tables: TableInfo[], options: ExportSnapshotOptions): SnapshotResolvedSelection[] {
+/**
+ * Resolves selections.
+ * @param tables Table descriptors.
+ * @param options Operation options.
+ */
+function resolveSelections(
+  tables: TableInfo[],
+  options: ExportSnapshotOptions,
+): SnapshotResolvedSelection[] {
   const defaults = defaultTableSelection(options);
   const selected = new Map<string, SnapshotResolvedSelection>();
 
@@ -173,10 +276,14 @@ function resolveSelections(tables: TableInfo[], options: ExportSnapshotOptions):
     for (const selector of options.scope.tables ?? []) {
       const table = tables.find(
         (candidate) =>
-          candidate.app === selector.app && candidate.db === selector.db && candidate.tableName === selector.tableName,
+          candidate.app === selector.app &&
+          candidate.db === selector.db &&
+          candidate.tableName === selector.tableName,
       );
       if (!table) {
-        throw new Error(`Snapshot export table ${selector.app}/${selector.db}/${selector.tableName} does not exist`);
+        throw new Error(
+          `Snapshot export table ${selector.app}/${selector.db}/${selector.tableName} does not exist`,
+        );
       }
 
       selected.set(tableKey(table.app, table.db, table.tableName), {
@@ -191,22 +298,32 @@ function resolveSelections(tables: TableInfo[], options: ExportSnapshotOptions):
   }
 
   return [...selected.values()].sort((left, right) =>
-    tableKey(left.table.app, left.table.db, left.table.tableName).localeCompare(tableKey(right.table.app, right.table.db, right.table.tableName)),
+    tableKey(left.table.app, left.table.db, left.table.tableName).localeCompare(
+      tableKey(right.table.app, right.table.db, right.table.tableName),
+    ),
   );
 }
 
+/**
+ * Handles path exists.
+ * @param path Filesystem path.
+ */
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return false;
     }
     throw error;
   }
 }
 
+/**
+ * Ensures empty directory.
+ * @param path Filesystem path.
+ */
 async function ensureEmptyDirectory(path: string): Promise<void> {
   if (await pathExists(path)) {
     const status = await stat(path);
@@ -223,6 +340,10 @@ async function ensureEmptyDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
 }
 
+/**
+ * Ensures missing file.
+ * @param path Filesystem path.
+ */
 async function ensureMissingFile(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   if (await pathExists(path)) {
@@ -230,61 +351,106 @@ async function ensureMissingFile(path: string): Promise<void> {
   }
 }
 
+/**
+ * Writes JSON file.
+ * @param path Filesystem path.
+ * @param value Value to process.
+ */
 async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+/**
+ * Writes NDJSON file.
+ * @param path Filesystem path.
+ * @param rows Rows to process.
+ */
 async function writeNdjsonFile(path: string, rows: unknown[]): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const content = rows.length > 0 ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n` : "";
-  await writeFile(path, content, "utf8");
+  const content =
+    rows.length > 0
+      ? `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`
+      : '';
+  await writeFile(path, content, 'utf8');
 }
 
+/**
+ * Reads JSON file.
+ * @param path Filesystem path.
+ */
 async function readJsonFile<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
+  return JSON.parse(await readFile(path, 'utf8')) as T;
 }
 
+/**
+ * Reads NDJSON file.
+ * @param path Filesystem path.
+ */
 async function readNdjsonFile<T>(path: string): Promise<T[]> {
   if (!(await pathExists(path))) {
     return [];
   }
-  const content = await readFile(path, "utf8");
+  const content = await readFile(path, 'utf8');
   if (!content.trim()) {
     return [];
   }
   return content
-    .split("\n")
+    .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as T);
 }
 
+/**
+ * Handles safe archive path.
+ * @param entryPath Entry path.
+ */
 function safeArchivePath(entryPath: string): boolean {
   const normalized = posix.normalize(entryPath);
-  if (normalized === "." || normalized === "") {
+  if (normalized === '.' || normalized === '') {
     return true;
   }
-  return !normalized.startsWith("../") && !normalized.startsWith("/") && normalized !== "..";
+  return (
+    !normalized.startsWith('../') &&
+    !normalized.startsWith('/') &&
+    normalized !== '..'
+  );
 }
 
-async function prepareExportRoot(outputPath: string, format: SnapshotFormat): Promise<{ rootPath: string; cleanupPath: string | null }> {
-  if (format === "directory") {
+/**
+ * Handles prepare export root.
+ * @param outputPath Output path.
+ * @param format Snapshot format.
+ */
+async function prepareExportRoot(
+  outputPath: string,
+  format: SnapshotFormat,
+): Promise<{ rootPath: string; cleanupPath: string | null }> {
+  if (format === 'directory') {
     await ensureEmptyDirectory(outputPath);
     return { rootPath: outputPath, cleanupPath: null };
   }
 
   await ensureMissingFile(outputPath);
-  const rootPath = await mkdtemp(join(tmpdir(), "steng-snapshot-export-"));
+  const rootPath = await mkdtemp(join(tmpdir(), 'steng-snapshot-export-'));
   return { rootPath, cleanupPath: rootPath };
 }
 
-async function prepareImportRoot(inputPath: string, format: SnapshotFormat): Promise<{ rootPath: string; cleanupPath: string | null }> {
+/**
+ * Handles prepare import root.
+ * @param inputPath Input path.
+ * @param format Snapshot format.
+ */
+async function prepareImportRoot(
+  inputPath: string,
+  format: SnapshotFormat,
+): Promise<{ rootPath: string; cleanupPath: string | null }> {
   if (!(await pathExists(inputPath))) {
     throw new Error(`Snapshot input ${inputPath} does not exist`);
   }
 
-  if (format === "directory") {
+  if (format === 'directory') {
     const status = await stat(inputPath);
     if (!status.isDirectory()) {
       throw new Error(`Snapshot input ${inputPath} must be a directory`);
@@ -292,23 +458,37 @@ async function prepareImportRoot(inputPath: string, format: SnapshotFormat): Pro
     return { rootPath: inputPath, cleanupPath: null };
   }
 
-  const rootPath = await mkdtemp(join(tmpdir(), "steng-snapshot-import-"));
+  const rootPath = await mkdtemp(join(tmpdir(), 'steng-snapshot-import-'));
   await tar.x({
     cwd: rootPath,
     file: inputPath,
-    gzip: format === "tar.gz",
+    gzip: format === 'tar.gz',
     filter: safeArchivePath,
   });
   return { rootPath, cleanupPath: rootPath };
 }
 
+/**
+ * Validates snapshot version.
+ * @param manifest Snapshot manifest.
+ */
 function assertSnapshotVersion(manifest: SnapshotManifest): void {
   if (manifest.formatVersion !== SNAPSHOT_VERSION) {
-    throw new Error(`Unsupported snapshot format version ${manifest.formatVersion}`);
+    throw new Error(
+      `Unsupported snapshot format version ${manifest.formatVersion}`,
+    );
   }
 }
 
-function assertSchemaMatchesManifest(schema: SnapshotTableSchema, manifest: SnapshotTableManifest): void {
+/**
+ * Validates schema matches manifest.
+ * @param schema Snapshot table schema.
+ * @param manifest Snapshot manifest.
+ */
+function assertSchemaMatchesManifest(
+  schema: SnapshotTableSchema,
+  manifest: SnapshotTableManifest,
+): void {
   if (
     schema.app !== manifest.app ||
     schema.db !== manifest.db ||
@@ -316,11 +496,21 @@ function assertSchemaMatchesManifest(schema: SnapshotTableSchema, manifest: Snap
     schema.type !== manifest.type ||
     schema.sourceTableId !== manifest.sourceTableId
   ) {
-    throw new Error(`Snapshot table schema mismatch for ${manifest.app}/${manifest.db}/${manifest.tableName}`);
+    throw new Error(
+      `Snapshot table schema mismatch for ${manifest.app}/${manifest.db}/${manifest.tableName}`,
+    );
   }
 }
 
-export async function exportSnapshotBundle(backend: SnapshotExportBackend, options: ExportSnapshotOptions): Promise<SnapshotManifest> {
+/**
+ * Exports snapshot bundle.
+ * @param backend Backend.
+ * @param options Operation options.
+ */
+export async function exportSnapshotBundle(
+  backend: SnapshotExportBackend,
+  options: ExportSnapshotOptions,
+): Promise<SnapshotManifest> {
   const format = resolveSnapshotFormat(options.outputPath, options.format);
   const prepared = await prepareExportRoot(options.outputPath, format);
 
@@ -338,16 +528,21 @@ export async function exportSnapshotBundle(backend: SnapshotExportBackend, optio
     const createdAtMs = Date.now();
 
     for (const resolved of selections) {
-      const exported = await backend.exportTable(resolved.table, resolved.selection);
+      const exported = await backend.exportTable(
+        resolved.table,
+        resolved.selection,
+      );
       const tableDir = bundleJoin(
-        "tables",
+        'tables',
         encodePathSegment(exported.table.app),
         encodePathSegment(exported.table.db),
         encodePathSegment(exported.table.tableName),
       );
-      const schemaPath = bundleJoin(tableDir, "schema.json");
-      const docsPath = bundleJoin(tableDir, "docs.ndjson");
-      const blobsPath = exported.selection.includeBlobs ? bundleJoin(tableDir, "blobs.ndjson") : undefined;
+      const schemaPath = bundleJoin(tableDir, 'schema.json');
+      const docsPath = bundleJoin(tableDir, 'docs.ndjson');
+      const blobsPath = exported.selection.includeBlobs
+        ? bundleJoin(tableDir, 'blobs.ndjson')
+        : undefined;
 
       const schema: SnapshotTableSchema = {
         app: exported.table.app,
@@ -360,22 +555,42 @@ export async function exportSnapshotBundle(backend: SnapshotExportBackend, optio
         selection: deepClone(exported.selection),
       };
 
-      const docs = [...exported.docs].sort((left, right) => left.id.localeCompare(right.id));
-      const blobs = [...exported.blobs].sort((left, right) => left.id.localeCompare(right.id));
+      const docs = [...exported.docs].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
+      const blobs = [...exported.blobs].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
 
-      await writeJsonFile(resolveBundlePath(prepared.rootPath, schemaPath), schema);
-      await writeNdjsonFile(resolveBundlePath(prepared.rootPath, docsPath), docs);
+      await writeJsonFile(
+        resolveBundlePath(prepared.rootPath, schemaPath),
+        schema,
+      );
+      await writeNdjsonFile(
+        resolveBundlePath(prepared.rootPath, docsPath),
+        docs,
+      );
 
       const blobRows: SnapshotBlobRecord[] = [];
       for (const blob of blobs) {
         if (sha256Hex(blob.bytes) !== blob.sha256) {
-          throw new Error(`Blob ${blob.id} in ${exported.table.app}/${exported.table.db}/${exported.table.tableName} has an invalid sha256`);
+          throw new Error(
+            `Blob ${blob.id} in ${exported.table.app}/${exported.table.db}/${exported.table.tableName} has an invalid sha256`,
+          );
         }
         if (blob.bytes.byteLength !== blob.size) {
-          throw new Error(`Blob ${blob.id} in ${exported.table.app}/${exported.table.db}/${exported.table.tableName} has an invalid size`);
+          throw new Error(
+            `Blob ${blob.id} in ${exported.table.app}/${exported.table.db}/${exported.table.tableName} has an invalid size`,
+          );
         }
 
-        const blobPath = bundleJoin("blobs", "sha256", blob.sha256.slice(0, 2), blob.sha256.slice(2, 4), `${blob.sha256}.bin`);
+        const blobPath = bundleJoin(
+          'blobs',
+          'sha256',
+          blob.sha256.slice(0, 2),
+          blob.sha256.slice(2, 4),
+          `${blob.sha256}.bin`,
+        );
         const absoluteBlobPath = resolveBundlePath(prepared.rootPath, blobPath);
         if (!(await pathExists(absoluteBlobPath))) {
           await mkdir(dirname(absoluteBlobPath), { recursive: true });
@@ -391,7 +606,10 @@ export async function exportSnapshotBundle(backend: SnapshotExportBackend, optio
       }
 
       if (blobsPath) {
-        await writeNdjsonFile(resolveBundlePath(prepared.rootPath, blobsPath), blobRows);
+        await writeNdjsonFile(
+          resolveBundlePath(prepared.rootPath, blobsPath),
+          blobRows,
+        );
       }
 
       const counts = {
@@ -429,16 +647,19 @@ export async function exportSnapshotBundle(backend: SnapshotExportBackend, optio
       totals,
     };
 
-    await writeJsonFile(resolveBundlePath(prepared.rootPath, "manifest.json"), manifest);
+    await writeJsonFile(
+      resolveBundlePath(prepared.rootPath, 'manifest.json'),
+      manifest,
+    );
 
-    if (format !== "directory") {
+    if (format !== 'directory') {
       await tar.c(
         {
           cwd: prepared.rootPath,
           file: options.outputPath,
-          gzip: format === "tar.gz",
+          gzip: format === 'tar.gz',
         },
-        ["."],
+        ['.'],
       );
     }
 
@@ -450,16 +671,26 @@ export async function exportSnapshotBundle(backend: SnapshotExportBackend, optio
   }
 }
 
-export async function importSnapshotBundle(backend: SnapshotImportBackend, options: ImportSnapshotOptions): Promise<SnapshotImportResult> {
+/**
+ * Imports snapshot bundle.
+ * @param backend Backend.
+ * @param options Operation options.
+ */
+export async function importSnapshotBundle(
+  backend: SnapshotImportBackend,
+  options: ImportSnapshotOptions,
+): Promise<SnapshotImportResult> {
   const format = resolveSnapshotFormat(options.inputPath, options.format);
   const prepared = await prepareImportRoot(options.inputPath, format);
   const resolvedOptions: ResolvedSnapshotImportOptions = {
-    mode: options.mode ?? "merge",
-    conflictMode: options.conflictMode ?? "error",
+    mode: options.mode ?? 'merge',
+    conflictMode: options.conflictMode ?? 'error',
   };
 
   try {
-    const manifest = await readJsonFile<SnapshotManifest>(resolveBundlePath(prepared.rootPath, "manifest.json"));
+    const manifest = await readJsonFile<SnapshotManifest>(
+      resolveBundlePath(prepared.rootPath, 'manifest.json'),
+    );
     assertSnapshotVersion(manifest);
 
     const result: SnapshotImportResult = {
@@ -474,11 +705,17 @@ export async function importSnapshotBundle(backend: SnapshotImportBackend, optio
     };
 
     for (const table of manifest.tables) {
-      const schema = await readJsonFile<SnapshotTableSchema>(resolveBundlePath(prepared.rootPath, table.files.schema));
+      const schema = await readJsonFile<SnapshotTableSchema>(
+        resolveBundlePath(prepared.rootPath, table.files.schema),
+      );
       assertSchemaMatchesManifest(schema, table);
-      const docs = await readNdjsonFile<SnapshotDocRecord>(resolveBundlePath(prepared.rootPath, table.files.docs));
+      const docs = await readNdjsonFile<SnapshotDocRecord>(
+        resolveBundlePath(prepared.rootPath, table.files.docs),
+      );
       const blobRows = table.files.blobs
-        ? await readNdjsonFile<SnapshotBlobRecord>(resolveBundlePath(prepared.rootPath, table.files.blobs))
+        ? await readNdjsonFile<SnapshotBlobRecord>(
+            resolveBundlePath(prepared.rootPath, table.files.blobs),
+          )
         : [];
 
       const blobs: SnapshotImportBlob[] = [];
@@ -486,10 +723,14 @@ export async function importSnapshotBundle(backend: SnapshotImportBackend, optio
         const blobPath = resolveBundlePath(prepared.rootPath, blob.path);
         const bytes = new Uint8Array(await readFile(blobPath));
         if (sha256Hex(bytes) !== blob.sha256) {
-          throw new Error(`Snapshot blob ${blob.id} for ${schema.app}/${schema.db}/${schema.tableName} failed sha256 verification`);
+          throw new Error(
+            `Snapshot blob ${blob.id} for ${schema.app}/${schema.db}/${schema.tableName} failed sha256 verification`,
+          );
         }
         if (bytes.byteLength !== blob.size) {
-          throw new Error(`Snapshot blob ${blob.id} for ${schema.app}/${schema.db}/${schema.tableName} failed size verification`);
+          throw new Error(
+            `Snapshot blob ${blob.id} for ${schema.app}/${schema.db}/${schema.tableName} failed size verification`,
+          );
         }
         blobs.push({
           ...blob,

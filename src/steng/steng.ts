@@ -1,9 +1,12 @@
-import { newDb } from "pg-mem";
-import type { Pool } from "pg";
-import { StengEngine } from "./engine/steng_engine.js";
-import { PostgresStengEngine, SqliteStengEngine } from "./engine/sql_steng_engine.js";
-import type { PostgresDbOptions } from "./sqldb/postgres_db.js";
-import type { SqliteDbOptions } from "./sqldb/sqlite_db.js";
+import { newDb } from 'pg-mem';
+import type { Pool } from 'pg';
+import { StengEngine } from './engine/steng_engine.js';
+import {
+  PostgresStengEngine,
+  SqliteStengEngine,
+} from './engine/sql_steng_engine.js';
+import type { PostgresDbOptions } from './sqldb/postgres_db.js';
+import type { SqliteDbOptions } from './sqldb/sqlite_db.js';
 import type {
   ChangeEvent,
   ExportSnapshotOptions,
@@ -21,7 +24,7 @@ import type {
   TableType,
   Unsub,
   Watermark,
-} from "./types.js";
+} from './types.js';
 
 /**
  * Stable `steng` API shared by the high-level wrapper and the low-level engines.
@@ -34,10 +37,19 @@ export interface StengApi {
   close(): Promise<void>;
 
   /** Create or fetch a table definition. */
-  ensure_table(app: string, db: string, table_name: string, type: TableType): Promise<TableInfo>;
+  ensure_table(
+    app: string,
+    db: string,
+    table_name: string,
+    type: TableType,
+  ): Promise<TableInfo>;
 
   /** Read table metadata by `(app, db, table_name)`. */
-  get_table_info(app: string, db: string, table_name: string): Promise<TableInfo | null>;
+  get_table_info(
+    app: string,
+    db: string,
+    table_name: string,
+  ): Promise<TableInfo | null>;
 
   /** Read table metadata by numeric `tableId`. */
   get_table_info_by_id(tableId: number): Promise<TableInfo | null>;
@@ -49,7 +61,12 @@ export interface StengApi {
   drop_table(tableId: number): Promise<void>;
 
   /** Add an index so a field can be used in filters. */
-  add_index(tableId: number, field: string, idx_type: IndexType, multi?: boolean): Promise<void>;
+  add_index(
+    tableId: number,
+    field: string,
+    idx_type: IndexType,
+    multi?: boolean,
+  ): Promise<void>;
 
   /** List all indexes currently configured for the table. */
   list_indexes(tableId: number): Promise<IndexInfo[]>;
@@ -63,10 +80,20 @@ export interface StengApi {
    * When `ids` is non-null, order follows the requested ids.
    * When `ids` is `null`, `filter` is applied and paging uses `start_pos`/`max_count`.
    */
-  get_objs(tableId: number, ids: string[] | null, filter: Filter | null, start_pos?: number, max_count?: number): Promise<GetResult>;
+  get_objs(
+    tableId: number,
+    ids: string[] | null,
+    filter: Filter | null,
+    start_pos?: number,
+    max_count?: number,
+  ): Promise<GetResult>;
 
   /** Subscribe to add/update/delete events matching the provided filter. */
-  subscribe_objs(tableId: number, filter: Filter | null, cb: (evt: ChangeEvent) => void): Unsub;
+  subscribe_objs(
+    tableId: number,
+    filter: Filter | null,
+    cb: (evt: ChangeEvent) => void,
+  ): Unsub;
 
   /** Insert one new row and return the generated internal document id. */
   add_obj(tableId: number, value: unknown): Promise<{ id: string }>;
@@ -77,28 +104,49 @@ export interface StengApi {
    * Caller-supplied ids are intentionally not allowed. If the application needs
    * its own business key, store that key inside the JSON value and index it.
    */
-  add_objs(tableId: number, rows: { value: unknown }[]): Promise<{ ids: string[] }>;
+  add_objs(
+    tableId: number,
+    rows: { value: unknown }[],
+  ): Promise<{ ids: string[] }>;
 
   /** Patch existing rows using deep merge by default or shallow merge when requested. */
-  update_objs(tableId: number, rows: { id: string; patch: unknown; merge?: "deep" | "shallow" }[]): Promise<void>;
+  update_objs(
+    tableId: number,
+    rows: { id: string; patch: unknown; merge?: 'deep' | 'shallow' }[],
+  ): Promise<void>;
 
   /** Replace the full stored value for existing rows. */
-  replace_objs(tableId: number, rows: { id: string; value: unknown }[]): Promise<void>;
+  replace_objs(
+    tableId: number,
+    rows: { id: string; value: unknown }[],
+  ): Promise<void>;
 
   /** Tombstone the given ids. */
   delete_objs(tableId: number, ids: string[]): Promise<void>;
 
   /** Store a blob and return its id. */
-  add_blob(tableId: number, id: string | null, bytes: Uint8Array, contentType: string): Promise<{ id: string }>;
+  add_blob(
+    tableId: number,
+    id: string | null,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<{ id: string }>;
 
   /** Delete blobs by id. */
   delete_blobs(tableId: number, ids: string[]): Promise<void>;
 
   /** Read one blob by id. */
-  get_blob(tableId: number, id: string): Promise<{ bytes: Uint8Array; contentType: string }>;
+  get_blob(
+    tableId: number,
+    id: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string }>;
 
   /** Read oplog entries with `op_seq > after_seq`, capped by `limit`. */
-  read_ops_since(tableId: number, after_seq: number, limit: number): Promise<Op[]>;
+  read_ops_since(
+    tableId: number,
+    after_seq: number,
+    limit: number,
+  ): Promise<Op[]>;
 
   /** Return the latest oplog sequence number for the table. */
   latest_seq(tableId: number): Promise<number>;
@@ -131,11 +179,13 @@ export interface StengApi {
    * synthetic restore operations, and remaps numeric table ids to the local
    * backend. `replace` mode clears each included table before restore.
    */
-  import_snapshot(options: ImportSnapshotOptions): Promise<SnapshotImportResult>;
+  import_snapshot(
+    options: ImportSnapshotOptions,
+  ): Promise<SnapshotImportResult>;
 }
 
 /** Backends supported by the high-level `Steng` wrapper. */
-export type StengBackend = "memory" | "sqlite" | "postgres";
+export type StengBackend = 'memory' | 'sqlite' | 'postgres';
 
 /**
  * High-level constructor options for `Steng`.
@@ -154,15 +204,10 @@ export type StengOptions = StengIdentityOptions & {
 
   /**
    * Postgres-specific connection options used when `backend === "postgres"`.
-   *
-   * If no real Postgres target is provided, `steng` uses embedded `pg-mem`
-   * by default so playgrounds and tests can run without a server.
    */
   postgres?: PostgresDbOptions & {
     /** SQL schema name for the `steng_*` tables. */
     schema?: string;
-    /** Force embedded `pg-mem` instead of a real connection target. */
-    emulate?: boolean;
   };
 };
 
@@ -171,10 +216,34 @@ type Runtime = {
   cleanup: () => Promise<void>;
 };
 
-function hasPostgresTarget(options: StengOptions["postgres"] | undefined): boolean {
+/**
+ * Returns whether this has Postgres target.
+ * @param options Operation options.
+ */
+function hasPostgresTarget(
+  options: StengOptions['postgres'] | undefined,
+): boolean {
   return Boolean(options?.pool || options?.connectionString || options?.config);
 }
 
+type InternalPostgresOptions = NonNullable<StengOptions['postgres']> & {
+  emulate?: boolean;
+};
+
+/**
+ * Handles uses emulated Postgres.
+ * @param options Operation options.
+ */
+function usesEmulatedPostgres(
+  options: StengOptions['postgres'] | undefined,
+): boolean {
+  return (options as InternalPostgresOptions | undefined)?.emulate === true;
+}
+
+/**
+ * Handles identity options.
+ * @param options Operation options.
+ */
 function identityOptions(options: StengOptions): StengIdentityOptions {
   return {
     clusterId: options.clusterId,
@@ -189,25 +258,31 @@ function identityOptions(options: StengOptions): StengIdentityOptions {
  * keep backend setup out of application code.
  */
 function createRuntime(options: StengOptions): Runtime {
-  const backend = options.backend ?? "memory";
+  const backend = options.backend ?? 'memory';
 
-  if (backend === "memory") {
+  if (backend === 'memory') {
     const api = new StengEngine(identityOptions(options));
     return {
       api,
+      /**
+       * Handles cleanup.
+       */
       cleanup: async () => {
         await api.close();
       },
     };
   }
 
-  if (backend === "sqlite") {
+  if (backend === 'sqlite') {
     const api = new SqliteStengEngine({
       ...(options.sqlite ?? {}),
       ...identityOptions(options),
     });
     return {
       api,
+      /**
+       * Handles cleanup.
+       */
       cleanup: async () => {
         await api.close();
       },
@@ -215,11 +290,13 @@ function createRuntime(options: StengOptions): Runtime {
   }
 
   const postgres = options.postgres ?? {};
-  if (postgres.emulate && hasPostgresTarget(postgres)) {
-    throw new Error("postgres.emulate cannot be combined with pool, connectionString, or config");
+  if (usesEmulatedPostgres(postgres) && hasPostgresTarget(postgres)) {
+    throw new Error(
+      'postgres.emulate cannot be combined with pool, connectionString, or config',
+    );
   }
 
-  if (postgres.emulate === false || hasPostgresTarget(postgres)) {
+  if (hasPostgresTarget(postgres)) {
     const api = new PostgresStengEngine({
       ...postgres,
       schema: postgres.schema,
@@ -227,10 +304,19 @@ function createRuntime(options: StengOptions): Runtime {
     });
     return {
       api,
+      /**
+       * Handles cleanup.
+       */
       cleanup: async () => {
         await api.close();
       },
     };
+  }
+
+  if (!usesEmulatedPostgres(postgres)) {
+    throw new Error(
+      'Postgres backend requires a real target via postgres.connectionString, postgres.config, or postgres.pool',
+    );
   }
 
   const mem = newDb();
@@ -238,12 +324,15 @@ function createRuntime(options: StengOptions): Runtime {
   const pool = new adapter.Pool();
   const api = new PostgresStengEngine({
     pool: pool as unknown as Pool,
-    schema: postgres.schema ?? "steng",
+    schema: postgres.schema ?? 'steng',
     ...identityOptions(options),
   });
 
   return {
     api,
+    /**
+     * Handles cleanup.
+     */
     cleanup: async () => {
       await api.close();
       await pool.end();
@@ -265,7 +354,7 @@ export class Steng implements StengApi {
 
   /** Create a new `steng` instance from one set of options. */
   constructor(options: StengOptions = {}) {
-    this.backend = options.backend ?? "memory";
+    this.backend = options.backend ?? 'memory';
     const runtime = createRuntime(options);
     this.api = runtime.api;
     this.cleanup = runtime.cleanup;
@@ -282,12 +371,21 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  ensure_table(app: string, db: string, table_name: string, type: TableType): Promise<TableInfo> {
+  ensure_table(
+    app: string,
+    db: string,
+    table_name: string,
+    type: TableType,
+  ): Promise<TableInfo> {
     return this.api.ensure_table(app, db, table_name, type);
   }
 
   /** @inheritdoc */
-  get_table_info(app: string, db: string, table_name: string): Promise<TableInfo | null> {
+  get_table_info(
+    app: string,
+    db: string,
+    table_name: string,
+  ): Promise<TableInfo | null> {
     return this.api.get_table_info(app, db, table_name);
   }
 
@@ -307,7 +405,12 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  add_index(tableId: number, field: string, idx_type: IndexType, multi = false): Promise<void> {
+  add_index(
+    tableId: number,
+    field: string,
+    idx_type: IndexType,
+    multi = false,
+  ): Promise<void> {
     return this.api.add_index(tableId, field, idx_type, multi);
   }
 
@@ -317,17 +420,30 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  set_table_config(tableId: number, patch: Partial<TableConfig>): Promise<void> {
+  set_table_config(
+    tableId: number,
+    patch: Partial<TableConfig>,
+  ): Promise<void> {
     return this.api.set_table_config(tableId, patch);
   }
 
   /** @inheritdoc */
-  get_objs(tableId: number, ids: string[] | null, filter: Filter | null, start_pos = 0, max_count = -1): Promise<GetResult> {
+  get_objs(
+    tableId: number,
+    ids: string[] | null,
+    filter: Filter | null,
+    start_pos = 0,
+    max_count = -1,
+  ): Promise<GetResult> {
     return this.api.get_objs(tableId, ids, filter, start_pos, max_count);
   }
 
   /** @inheritdoc */
-  subscribe_objs(tableId: number, filter: Filter | null, cb: (evt: ChangeEvent) => void): Unsub {
+  subscribe_objs(
+    tableId: number,
+    filter: Filter | null,
+    cb: (evt: ChangeEvent) => void,
+  ): Unsub {
     return this.api.subscribe_objs(tableId, filter, cb);
   }
 
@@ -337,17 +453,26 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  add_objs(tableId: number, rows: { value: unknown }[]): Promise<{ ids: string[] }> {
+  add_objs(
+    tableId: number,
+    rows: { value: unknown }[],
+  ): Promise<{ ids: string[] }> {
     return this.api.add_objs(tableId, rows);
   }
 
   /** @inheritdoc */
-  update_objs(tableId: number, rows: { id: string; patch: unknown; merge?: "deep" | "shallow" }[]): Promise<void> {
+  update_objs(
+    tableId: number,
+    rows: { id: string; patch: unknown; merge?: 'deep' | 'shallow' }[],
+  ): Promise<void> {
     return this.api.update_objs(tableId, rows);
   }
 
   /** @inheritdoc */
-  replace_objs(tableId: number, rows: { id: string; value: unknown }[]): Promise<void> {
+  replace_objs(
+    tableId: number,
+    rows: { id: string; value: unknown }[],
+  ): Promise<void> {
     return this.api.replace_objs(tableId, rows);
   }
 
@@ -357,7 +482,12 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  add_blob(tableId: number, id: string | null, bytes: Uint8Array, contentType: string): Promise<{ id: string }> {
+  add_blob(
+    tableId: number,
+    id: string | null,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<{ id: string }> {
     return this.api.add_blob(tableId, id, bytes, contentType);
   }
 
@@ -367,12 +497,19 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  get_blob(tableId: number, id: string): Promise<{ bytes: Uint8Array; contentType: string }> {
+  get_blob(
+    tableId: number,
+    id: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string }> {
     return this.api.get_blob(tableId, id);
   }
 
   /** @inheritdoc */
-  read_ops_since(tableId: number, after_seq: number, limit: number): Promise<Op[]> {
+  read_ops_since(
+    tableId: number,
+    after_seq: number,
+    limit: number,
+  ): Promise<Op[]> {
     return this.api.read_ops_since(tableId, after_seq, limit);
   }
 
@@ -407,7 +544,9 @@ export class Steng implements StengApi {
   }
 
   /** @inheritdoc */
-  import_snapshot(options: ImportSnapshotOptions): Promise<SnapshotImportResult> {
+  import_snapshot(
+    options: ImportSnapshotOptions,
+  ): Promise<SnapshotImportResult> {
     return this.api.import_snapshot(options);
   }
 }

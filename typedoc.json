@@ -1,0 +1,36 @@
+{
+  "entryPoints": [
+    "src/steng/index.ts",
+    "src/cord/index.ts",
+    "src/netab/index.ts",
+    "src/app_helpers/pos/index.ts"
+  ],
+  "entryPointStrategy": "resolve",
+  "out": "docs/api",
+  "plugin": [],
+  "tsconfig": "tsconfig.json",
+  "sort": ["source-order"],
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "excludeInternal": true,
+  "readme": "none",
+  "includeVersion": true,
+  "intentionallyNotExported": [
+    "PlaygroundFiles",
+    "CoordStorageConfig",
+    "Statement",
+    "GroupRecord",
+    "RuntimeNode",
+    "ServerOptions",
+    "PosHelperOptions",
+    "ClusterOptions",
+    "ElectionOptions",
+    "FoundationOptions",
+    "StengCoordStoreOptions",
+    "ServiceOptions",
+    "SqlDialect",
+    "Queryable"
+  ],
+  "categorizeByGroup": false,
+  "groupOrder": ["Classes", "Interfaces", "Type Aliases", "Functions", "*"]
+}

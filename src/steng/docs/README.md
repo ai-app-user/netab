@@ -30,6 +30,11 @@ Construct the high-level facade and let it choose the backend:
 - `new Steng({ backend: "sqlite", sqlite: { filename: "./steng.sqlite" } })`
 - `new Steng({ backend: "postgres", postgres: { connectionString: "postgres://..." } })`
 
+Important:
+
+- `backend: "postgres"` now means a real Postgres target
+- `steng` no longer silently falls back to an embedded fake Postgres for normal app/playground usage
+
 Main API groups:
 
 - schema: `ensure_table`, `get_table_info`, `get_table_info_by_id`, `list_tables`, `drop_table`
@@ -173,6 +178,11 @@ Generated ID format:
 - `npm run steng:playground:snapshot`
 - `npm run steng:playground:subscriptions`
 - `npm run steng:playground:retention`
+
+For the Postgres playgrounds, set a real connection string first:
+
+- `export STENG_POSTGRES_URL=postgres://user:pass@host/db`
+- `export STENG_RESTORE_POSTGRES_URL=postgres://user:pass@host/db`
 
 ## Folder Map
 

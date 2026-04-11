@@ -1,5 +1,11 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from 'node:crypto';
 
+/**
+ * Create a detached deep clone of a structured-clone-compatible value.
+ *
+ * `undefined` is returned as-is so callers can preserve optional fields
+ * without allocating placeholder objects.
+ */
 export function deepClone<T>(value: T): T {
   if (value === undefined) {
     return value;
@@ -7,10 +13,17 @@ export function deepClone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/** True when `value` is a plain object-like record and not an array. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Merge two JSON-like objects recursively.
+ *
+ * Non-record inputs are replaced wholesale, which makes the function useful
+ * for patch semantics where arrays and scalars should overwrite existing data.
+ */
 export function deepMerge<T>(target: T, patch: unknown): T {
   if (!isRecord(target) || !isRecord(patch)) {
     return deepClone(patch as T);
@@ -20,30 +33,52 @@ export function deepMerge<T>(target: T, patch: unknown): T {
   for (const [key, value] of Object.entries(patch)) {
     const current = result[key];
     result[key] =
-      isRecord(current) && isRecord(value) ? deepMerge(current, value) : deepClone(value);
+      isRecord(current) && isRecord(value)
+        ? deepMerge(current, value)
+        : deepClone(value);
   }
 
   return result as T;
 }
 
+/**
+ * Merge top-level fields only.
+ *
+ * Nested objects are not traversed; a nested value in `patch` replaces the
+ * existing nested value in `target`.
+ */
 export function shallowMerge<T>(target: T, patch: Partial<T>): T {
   if (!isRecord(target) || !isRecord(patch)) {
     return deepClone(patch as T);
   }
-  return { ...(target as Record<string, unknown>), ...(patch as Record<string, unknown>) } as T;
+  return {
+    ...(target as Record<string, unknown>),
+    ...(patch as Record<string, unknown>),
+  } as T;
 }
 
-export function randomId(prefix = "id"): string {
-  return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
+/** Generate a compact random id with a readable prefix. */
+export function randomId(prefix = 'id'): string {
+  return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString('hex')}`;
 }
 
+/**
+ * Read one dotted field path from a JSON-like object.
+ *
+ * Example: `getField(order, "customer.email")`.
+ */
 export function getField(value: unknown, path: string): unknown {
-  if (path === "id" && typeof value === "object" && value !== null && "id" in value) {
+  if (
+    path === 'id' &&
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value
+  ) {
     return (value as { id: unknown }).id;
   }
 
   let current: unknown = value;
-  for (const part of path.split(".")) {
+  for (const part of path.split('.')) {
     if (!isRecord(current) && !Array.isArray(current)) {
       return undefined;
     }
@@ -52,6 +87,9 @@ export function getField(value: unknown, path: string): unknown {
   return current;
 }
 
+/**
+ * Return a deep-cloned projection containing only the requested dotted fields.
+ */
 export function pickFields(value: unknown, fields?: string[]): unknown {
   if (!fields || fields.length === 0 || !isRecord(value)) {
     return deepClone(value);
@@ -59,7 +97,7 @@ export function pickFields(value: unknown, fields?: string[]): unknown {
 
   const out: Record<string, unknown> = {};
   for (const field of fields) {
-    const parts = field.split(".");
+    const parts = field.split('.');
     let src: unknown = value;
     let dst: Record<string, unknown> = out;
 
@@ -87,6 +125,7 @@ export function pickFields(value: unknown, fields?: string[]): unknown {
   return out;
 }
 
+/** List the enumerable top-level keys of a record. */
 export function topLevelKeys(value: unknown): string[] {
   if (!isRecord(value)) {
     return [];
@@ -94,20 +133,24 @@ export function topLevelKeys(value: unknown): string[] {
   return Object.keys(value);
 }
 
+/** Stable JSON stringification that sorts only the first-level keys. */
 export function stableStringify(value: unknown): string {
   return JSON.stringify(value, Object.keys(value as object).sort());
 }
 
+/** Compute a lowercase SHA-256 hex digest. */
 export function sha256Hex(value: Uint8Array | string): string {
-  const hash = createHash("sha256");
+  const hash = createHash('sha256');
   hash.update(value);
-  return hash.digest("hex");
+  return hash.digest('hex');
 }
 
+/** Encode raw bytes as Base64. */
 export function bytesToBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
+  return Buffer.from(bytes).toString('base64');
 }
 
+/** Decode a Base64 string into raw bytes. */
 export function base64ToBytes(value: string): Uint8Array {
-  return new Uint8Array(Buffer.from(value, "base64"));
+  return new Uint8Array(Buffer.from(value, 'base64'));
 }

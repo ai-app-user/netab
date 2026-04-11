@@ -3,6 +3,7 @@
 Implementation status in this repo:
 
 - implemented: `CoordStore`, `MemoryStore`, `FileJsonStore`
+- implemented: `StengCoordStore` plus runtime storage resolution (`sqlite` default, `file` fallback, explicit `psql` switch)
 - implemented: foundation RPC/discovery plus per-node route tables, deny rules, single-hop proxying, and universal `--dst` forwarding
 - implemented: cluster specs, membership, heartbeats, alive view, cluster fanout
 - implemented: IAM groups/users/commands/grants
@@ -59,10 +60,33 @@ Current foundation UX additions implemented in this repo:
 - automatic peer learning on successful RPCs
 - `-peers` to show learned peer identity/path state
 - `-routes` to show effective routing policy and path shape
+- `-exec` to run a host shell command on a Linux/Windows/macOS node
 - `-connect` to create a durable reverse path
 - `-learn` to import peer suggestions from another node
 - explicit proxy policy with `-route:add`
 - proxy default mode with `-proxy:on` / `-proxy:off`
+
+Current storage UX additions implemented in this repo:
+
+- the coord runtime now provisions durable state automatically on first `-start`
+- default policy is `auto`: prefer `sqlite`, fall back to `file` if SQLite cannot be opened
+- saved local node definitions now live in the same durable coord store as routes, peer cache, and persistent connect intents
+- `-restore` restarts saved nodes from that durable store and replays persistent reverse connects
+- `-stor` inspects or switches the durable backend for the current coord root
+- `-stor sqlite` and `-stor file` use sensible default locations when none are provided
+- `-stor psql ...` performs an export/import style migration into PostgreSQL and updates the root config
+- switching storage while daemons are running stops them, migrates the shared state, then starts them again
+
+Quick storage examples:
+
+- inspect the current root storage:
+  - `./scripts/coord -stor`
+- switch to an explicit JSON file backend:
+  - `./scripts/coord -stor file`
+- switch back to explicit SQLite:
+  - `./scripts/coord -stor sqlite`
+- migrate the current root into PostgreSQL:
+  - `./scripts/coord -stor psql $COORD_PSQL_URL --schema=coord_root`
 
 Current path notation:
 
@@ -74,6 +98,7 @@ Current peer/routing mental model:
 
 - `-peers` answers: "who do I know, and what is my best known way to reach them?"
 - `-routes` answers: "what path will I actually take, including explicit route policy?"
+- `-start:PORT` binds on all interfaces by default and auto-advertises a non-loopback address when one is available, so public nodes do not need a special config file just to listen off-host.
 - a one-off direct call usually yields:
   - caller sees `WAYS=out`
   - callee sees `WAYS=in`
@@ -84,9 +109,15 @@ Examples of the current UX:
 - direct learn:
   - `./scripts/coord @A -whoami @127.0.0.1:4104`
   - `./scripts/coord @A -peers`
+- host shell command:
+  - `./scripts/coord -exec uname -a`
+  - `./scripts/coord @D -exec @A uname -a --verbose`
+  - `./scripts/coord -exec @vps command="powershell -Command Get-Date" --os=windows`
 - reverse connect:
-  - `./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0`
+  - `./scripts/coord @A -connect @127.0.0.1:4104`
   - `./scripts/coord @P -whoami @A`
+- runtime-only reverse connect:
+  - `./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0`
 - proxy through a reverse-connected proxy:
   - `./scripts/coord @D -learn @P`
   - `./scripts/coord @D -route:add @A @P`
@@ -97,7 +128,11 @@ Examples of the current UX:
 
 Implementation note:
 
-- reverse connections are runtime-scoped today: `--ttl=0` means "keep it until disconnected or the daemon stops", not "survive daemon restart"
+- durable storage is root-scoped today: all daemons under one `COORD_PLAYGROUND_ROOT` share the same configured durable backend
+- default `-connect` creates a persistent reconnect intent and `--ttl=0` creates a runtime-only link
+- live sockets never survive process death on Linux or Android; persistence means the reconnect intent is replayed after restart, not that the old socket remains alive
+- node identity now includes `props.osType` and `props.execSupported` so peers can tell whether host shell execution is expected to work
+- Android app nodes publish `osType=android` and return `supported=false` for `-exec`; real shell execution is only implemented for the Node-hosted Linux/Windows/macOS runtime
 
 1) What cord is for
 cord provides four big capabilities:
@@ -1493,6 +1528,46 @@ Example:
 ./scripts/coord @D -peers
 
 Typical result:
+
+10.8 Storage addendum
+
+The runtime now has a real storage policy layer instead of always hardcoding `coord.store.json`.
+
+Current runtime behavior:
+
+- first `-start` or first `-stor` in a new root provisions storage automatically
+- preferred backend is SQLite at:
+  - `<COORD_PLAYGROUND_ROOT>/coord.store.sqlite`
+- fallback backend is JSON file state at:
+  - `<COORD_PLAYGROUND_ROOT>/coord.store.json`
+- the active storage selection is tracked in:
+  - `<COORD_PLAYGROUND_ROOT>/coord.storage.json`
+
+Operator commands:
+
+- inspect:
+  - `./scripts/coord -stor`
+- switch to SQLite:
+  - `./scripts/coord -stor sqlite`
+  - `./scripts/coord -stor sqlite ./var/coord/root.sqlite`
+- switch to file:
+  - `./scripts/coord -stor file`
+  - `./scripts/coord -stor file ./tmp/coord.backup.json`
+- switch to PostgreSQL:
+  - `./scripts/coord -stor psql $COORD_PSQL_URL --schema=coord_root`
+
+Behavior when switching:
+
+- the command stops live daemons in the current root
+- it copies all coord KV state into the destination backend
+- it updates `coord.storage.json`
+- it restarts the daemons that were running before the switch
+
+Important current boundary:
+
+- storage switching preserves durable coord state such as peers, routes, IAM, bootstrap, election tables, and cluster metadata
+- it does not preserve live reverse sockets in memory; after restart those runtime connections must be re-established
+- `-stor psql` now means a real Postgres server only
 
 A via P appears as:
 

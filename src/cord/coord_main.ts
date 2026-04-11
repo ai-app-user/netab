@@ -1,4 +1,4 @@
-import { runCoordCli } from "./coord_runtime.js";
+import { runCoordCli } from './coord_runtime.js';
 
 runCoordCli(process.argv.slice(2)).then(
   (code) => {

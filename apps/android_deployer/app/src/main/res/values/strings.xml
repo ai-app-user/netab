@@ -1,0 +1,27 @@
+<resources>
+  <string name="app_name">Android Deployer</string>
+  <string name="screen_title">Netab Android Deployer</string>
+  <string name="screen_subtitle">Checks the VPS release feed, shows what is installed on this device, and offers a single update/install action when needed.</string>
+  <string name="manifest_url_hint">http://host/path/latest.json</string>
+  <string name="section_app">Feed</string>
+  <string name="section_versions">Versions</string>
+  <string name="section_advanced">Advanced</string>
+  <string name="label_name">App</string>
+  <string name="label_channel">Channel</string>
+  <string name="label_package">Package</string>
+  <string name="label_installed">Installed</string>
+  <string name="label_available">Available</string>
+  <string name="label_status">Status</string>
+  <string name="reload_manifest">Reload feed</string>
+  <string name="save_and_reload">Use this feed</string>
+  <string name="button_update">Update</string>
+  <string name="button_install">Install</string>
+  <string name="button_up_to_date">Up to date</string>
+  <string name="button_checking">Checking…</string>
+  <string name="status_idle">Status: idle</string>
+  <string name="no_release_loaded">No release loaded yet.</string>
+  <string name="not_available">—</string>
+  <string name="not_installed">Not installed</string>
+  <string name="default_app_tester_manifest">http://157.250.198.83/netab/android/app_tester/dev/latest.json</string>
+  <string name="default_deployer_manifest">http://157.250.198.83/netab/android/android_deployer/stable/latest.json</string>
+</resources>

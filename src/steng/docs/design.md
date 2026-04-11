@@ -417,7 +417,7 @@ Implemented adapters:
   - file-backed or in-memory SQLite
   - `better-sqlite3`
 - [postgres_db.ts](../sqldb/postgres_db.ts)
-  - real `pg` or embedded `pg-mem`
+  - real `pg`
 
 The current [memory_sql_db.ts](../sqldb/memory_sql_db.ts) remains a simple placeholder/test double for the SQL abstraction itself, not the main storage engine.
 

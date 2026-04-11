@@ -1,0 +1,7 @@
+apps/**/build/
+coverage/
+docs/api/
+docs/style/google/sources/*.html
+docs/style/google/sources/google-styleguide-LICENSE
+node_modules/
+tools/google-style/bin/

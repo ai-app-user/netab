@@ -55,6 +55,22 @@ Behavior:
 
 `cord` can run with or without durable state.
 
+Current runtime default:
+
+- if you use the `coord` CLI, durable state is now provisioned automatically
+- default policy is `sqlite` first, `file` fallback
+- the same durable coord store now holds:
+  - saved local node definitions
+  - route policy
+  - peer cache
+  - persistent reverse connect intents
+- inspect or switch it with:
+  - `./scripts/coord -stor`
+  - `./scripts/coord -stor sqlite`
+  - `./scripts/coord -stor file`
+  - `./scripts/coord -stor psql $COORD_PSQL_URL --schema=coord_root`
+  - `./scripts/coord -restore`
+
 ### Ephemeral memory
 
 Default:
@@ -88,11 +104,56 @@ Persisted now:
 - bootstrap unallocated registry
 - shard specs
 - leader assignment cache
+- saved local node catalog
+- persistent reverse connect intents
 
 Still volatile:
 
 - runtime lease votes
 - in-memory alive view
+
+### SQLite-backed runtime store
+
+This is now the preferred durable backend for the `coord` CLI runtime, using `StengCoordStore` under the hood:
+
+```bash
+./scripts/coord -stor sqlite
+./scripts/coord -stor
+```
+
+Typical location:
+
+- `<COORD_PLAYGROUND_ROOT>/coord.store.sqlite`
+
+### PostgreSQL-backed runtime store
+
+Use this when you want the current coord root to migrate into PostgreSQL:
+
+```bash
+./scripts/coord -stor psql $COORD_PSQL_URL --schema=coord_root
+```
+
+The command stops running daemons in the current root, migrates the KV state, updates `coord.storage.json`, and restarts the daemons that were previously running.
+
+### Restore after stop or reboot
+
+`coord` now keeps the saved node catalog and persistent connect intents in the durable store. A normal lifecycle is:
+
+```bash
+./scripts/coord -start:4101 A
+./scripts/coord -start:4104 P
+./scripts/coord @A -connect @127.0.0.1:4104
+./scripts/coord -stop all
+./scripts/coord -restore
+```
+
+What `-restore` does:
+
+- starts missing saved local nodes again
+- leaves already-running nodes alone
+- replays persistent reverse connects
+
+Use `--ttl=0` on `-connect` when you want a runtime-only connection that should not be restored.
 
 ## Operational Notes
 

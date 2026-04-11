@@ -20,6 +20,7 @@ Short examples:
 
 ```bash
 ./scripts/coord -status
+./scripts/coord -stor
 ./scripts/coord -start:4102 A
 ./scripts/coord -whoami
 ./scripts/coord -connect @127.0.0.1:4104 --ttl=0
@@ -32,16 +33,23 @@ Important behavior:
 
 - If exactly one local daemon exists in the current `COORD_PLAYGROUND_ROOT`, sender selection is implicit.
 - If multiple local daemons exist, you must choose the local sender explicitly, for example `coord @A -peers`.
+- `-start:PORT` binds on all interfaces by default and auto-advertises a non-loopback address when one is available.
 - Any successful RPC learns peer identity automatically.
 - `-connect` upgrades one-way reachability into a durable reverse path.
+- default `-connect` is persistent forever and is replayed by `-restore`.
+- `-connect --ttl=0` is runtime-only and is not replayed after restart.
+- `-restore` restarts saved local nodes from the durable store and replays persistent connect intents.
 - `-learn` imports remote peer names as suggestions.
 - `-route:add` is still available when you want explicit proxy policy.
+- Storage is provisioned automatically per coord root: SQLite first, JSON file fallback.
 
 ## Current Commands
 
 Local/system commands:
 
 - `-start[:port] [node_name] [config.json|config.js]`
+- `-stor [sqlite|psql|file] [location]`
+- `-restore`
 - `-stop [node_name|all]`
 - `-status`
 - `-cleanup [local|global]`
@@ -56,9 +64,10 @@ Foundation commands:
 - `-ping @target`
 - `-echo [@target] [args...] [@./file|f:./file|@-]`
 - `-sleep [@target] 200`
+- `-exec [@target] command... [--os=linux,windows]`
 - `-peers [@target]`
 - `-routes [@target]`
-- `-connect @target --ttl=0`
+- `-connect @target [--ttl=SECONDS]`
 - `-disconnect @target`
 - `-learn @target`
 - `-route:add @dst [@proxy]`
@@ -90,6 +99,7 @@ Cluster / IAM / election commands:
 Start one node and use implicit sender selection:
 
 ```bash
+./scripts/coord -stor
 ./scripts/coord -start:4102 A
 ./scripts/coord -status
 ./scripts/coord -whoami
@@ -100,6 +110,19 @@ Expected:
 
 - `-whoami` runs on `A`
 - `-peers` is empty until `A` talks to another node
+
+Typical initial storage result:
+
+```text
+coord storage
+
+root: .../tmp/cord_foundation
+policy: auto
+backend: sqlite
+location: .../coord.store.sqlite
+status: healthy
+fallback: file .../coord.store.json
+```
 
 ### 2. Direct Learning By IP
 
@@ -141,7 +164,7 @@ This is the one-way case:
 Now upgrade that one-way direct reachability into a durable reverse path.
 
 ```bash
-./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0
+./scripts/coord @A -connect @127.0.0.1:4104
 ./scripts/coord @A -peers
 ./scripts/coord @P -peers
 ./scripts/coord @P -whoami @A
@@ -168,6 +191,29 @@ A         reverse           both   -        connected
 - `A` initiated the long-lived connection into `P`
 - `P` can now reach `A` over that reverse path
 - path rendering uses `-<` for that last hop
+
+If you want a runtime-only link that should disappear on restart:
+
+```bash
+./scripts/coord @A -connect @127.0.0.1:4104 --ttl=0
+```
+
+### 3b. Host Shell Exec
+
+Run a shell command on the sender or on a routed destination:
+
+```bash
+./scripts/coord -exec uname -a
+./scripts/coord -exec @127.0.0.1:4104 uname -a
+./scripts/coord @D -exec @A uname -a --verbose
+./scripts/coord -exec @vps command="powershell -Command Get-Date" --os=windows
+```
+
+Notes:
+
+- `--os=...` skips execution unless the remote node reports a matching `props.osType`
+- Linux, Windows, and macOS Node runtimes support `-exec`
+- Android app nodes report `osType=android` and return `supported=false` for `-exec`
 
 ### 4. Learn Peers From A Proxy
 
@@ -218,6 +264,66 @@ That means:
 ### 6. Reply Path Learned On `A`
 
 After `D` reaches `A` through `P`, `A` learns that `D` exists via `P`:
+
+### 7. Switching Durable Storage
+
+The new `-stor` command is root-scoped. It affects the shared durable state for all daemons started under the same `COORD_PLAYGROUND_ROOT`.
+
+### 8. Restoring Saved Nodes And Persistent Connects
+
+Saved node definitions now live in the same durable coord store as the rest of the root state. `-stop all` stops processes but does not forget the configured nodes.
+
+```bash
+./scripts/coord -start:4101 A
+./scripts/coord -start:4104 P
+./scripts/coord @A -connect @127.0.0.1:4104
+./scripts/coord -stop all
+./scripts/coord -restore
+```
+
+Expected:
+
+- `A` and `P` are started again from the durable node catalog
+- `A` replays its persistent reverse connect to `P`
+- `P` can call back into `A` again without manually reconnecting
+
+Use `--ttl=0` on connect when you explicitly do not want `-restore` to replay that link.
+
+Inspect current storage:
+
+```bash
+./scripts/coord -stor
+```
+
+Switch the current root to an explicit JSON-file backend:
+
+```bash
+./scripts/coord -stor file
+```
+
+Typical result:
+
+```text
+coord storage
+
+root: .../tmp/cord_foundation
+policy: explicit
+backend: file
+location: .../coord.store.json
+status: healthy
+
+migrated from: sqlite .../coord.store.sqlite
+migrated keys: 33
+restarted nodes: A
+```
+
+Switch to explicit PostgreSQL:
+
+```bash
+./scripts/coord -stor psql $COORD_PSQL_URL --schema=coord_root
+```
+
+This command now requires a real Postgres server. There is no fake Postgres mode in the playground storage UX.
 
 ```bash
 ./scripts/coord @A -peers
@@ -451,7 +557,9 @@ The CLI playground persists state under `tmp/cord_foundation` by default:
 
 - `coord.nodes.json`: started playground nodes and their current persisted `nodeEpoch`
 - `coord.cache.json`: discovery cache used for name -> addr resolution
-- `coord.store.json`: shared `FileJsonStore` backing foundation route policy/observations, cluster, IAM, bootstrap, and election state
+- `coord.storage.json`: active storage selection for the current root
+- `coord.store.sqlite`: default SQLite durable backend for the current root
+- `coord.store.json`: JSON-file fallback or explicit file backend
 
 You can change the root with:
 

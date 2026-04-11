@@ -1,11 +1,21 @@
 /** Supported table storage modes. */
-export type TableType = "json" | "binary";
+export type TableType = 'json' | 'binary';
 
 /** Secondary index types supported by `steng` filters. */
-export type IndexType = "i64" | "str" | "bool" | "time" | "hash64";
+export type IndexType = 'i64' | 'str' | 'bool' | 'time' | 'hash64';
 
 /** Comparison operators accepted by `get_objs` filters. */
-export type FilterOp = "==" | "!=" | ">" | ">=" | "<" | "<=" | "between" | "in" | "contains" | "prefix";
+export type FilterOp =
+  | '=='
+  | '!='
+  | '>'
+  | '>='
+  | '<'
+  | '<='
+  | 'between'
+  | 'in'
+  | 'contains'
+  | 'prefix';
 
 /**
  * One filter condition in `[field, operator, value]` form.
@@ -78,7 +88,7 @@ export type ObjRow = {
   /** Metadata for present rows. */
   meta?: DocMeta;
   /** Miss reason when the requested object is absent. */
-  miss?: "NOT_FOUND" | "PRUNED";
+  miss?: 'NOT_FOUND' | 'PRUNED';
 };
 
 export type GetResult = {
@@ -94,7 +104,7 @@ export type ChangeEvent = {
   /** Wall-clock time when the local engine emitted the event. */
   ts: number;
   /** Event kind derived from the write operation. */
-  op: "added" | "updated" | "deleted";
+  op: 'added' | 'updated' | 'deleted';
   /** Changed object id. */
   id: string;
   /** New value for add/update events. */
@@ -130,7 +140,14 @@ export type Op = {
   /** Operation timestamp in milliseconds. */
   ts_ms: number;
   /** Operation kind stored in the oplog. */
-  op_type: "ADD" | "UPDATE" | "REPLACE" | "DELETE" | "BLOB_ADD" | "BLOB_DEL" | "SCHEMA";
+  op_type:
+    | 'ADD'
+    | 'UPDATE'
+    | 'REPLACE'
+    | 'DELETE'
+    | 'BLOB_ADD'
+    | 'BLOB_DEL'
+    | 'SCHEMA';
   /** Object or blob id referenced by the operation. */
   id: string;
   /** Operation payload; structure depends on `op_type`. */
@@ -145,7 +162,7 @@ export type StengIdentityOptions = {
 };
 
 /** Bundle container formats supported by snapshot export/import. */
-export type SnapshotFormat = "directory" | "tar" | "tar.gz";
+export type SnapshotFormat = 'directory' | 'tar' | 'tar.gz';
 
 /**
  * One exact table selector used by snapshot export.
@@ -270,11 +287,11 @@ export type SnapshotTableManifest = SnapshotTableSchema & {
 /** Top-level manifest written to `manifest.json` for one logical snapshot bundle. */
 export type SnapshotManifest = {
   /** Stable manifest version string. */
-  formatVersion: "steng.snapshot.v1";
+  formatVersion: 'steng.snapshot.v1';
   /** Wall-clock time when the snapshot export started. */
   createdAtMs: number;
   /** Backend used to create the snapshot. */
-  sourceBackend: "memory" | "sqlite" | "postgres";
+  sourceBackend: 'memory' | 'sqlite' | 'postgres';
   /** Original requested scope, or `null` when exporting all tables. */
   scope: SnapshotScope | null;
   /** Global default for blob inclusion during export. */
@@ -318,10 +335,10 @@ export type ExportSnapshotOptions = {
 };
 
 /** Import strategy for included tables. */
-export type ImportSnapshotMode = "merge" | "replace";
+export type ImportSnapshotMode = 'merge' | 'replace';
 
 /** Conflict strategy when an imported id already exists locally. */
-export type ImportSnapshotConflictMode = "error" | "skip" | "replace";
+export type ImportSnapshotConflictMode = 'error' | 'skip' | 'replace';
 
 /** Options for `import_snapshot`. */
 export type ImportSnapshotOptions = {
